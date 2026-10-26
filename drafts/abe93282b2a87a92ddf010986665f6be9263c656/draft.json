@@ -1,0 +1,22 @@
+{
+  "groups": [
+    {
+      "category": "sdk",
+      "entries": [
+        {
+          "zh": "本次仅修复 CMake 包集成。通过 `find_package(smrcore_peripherals CONFIG)` 引入共享库时，不再查找私有依赖 `Threads` 和 `nlohmann_json`，避免因缺少 `nlohmann_json` 开发包而配置失败。静态库使用方仍会解析这两项依赖；从源码构建库仍需要它们。链接目标仍为 `smrcore::peripherals`。",
+          "en": "This is a CMake package integration maintenance fix. Importing the shared library with `find_package(smrcore_peripherals CONFIG)` no longer looks up the private dependencies `Threads` and `nlohmann_json`, avoiding configuration failures caused by a missing `nlohmann_json` development package. Static library consumers still resolve both dependencies; building the library from source still requires them. The link target remains `smrcore::peripherals`.",
+          "commits": [
+            "abe93282b2a87a92ddf010986665f6be9263c656"
+          ]
+        }
+      ]
+    }
+  ],
+  "uncertainties": [
+    {
+      "zh": "以上依据配置模板和源码核对，未运行构建或下游集成测试；尚未验证预编译发布包是否包含此修复。",
+      "en": "These notes were verified against the configuration template and source. Builds and downstream integration tests were not run; inclusion of this fix in prebuilt release packages remains unverified."
+    }
+  ]
+}

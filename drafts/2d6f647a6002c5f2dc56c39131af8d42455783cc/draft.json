@@ -1,0 +1,22 @@
+{
+  "groups": [
+    {
+      "category": "sdk",
+      "entries": [
+        {
+          "zh": "本范围仅包含发布维护变更。新增双语发布说明草稿工作流，以已发布正式版本的祖先提交为基线，固定比较提交范围。需要配置 `OPENAI_API_KEY`。草稿作为 Actions 制品保留 90 天，不自动发布。准备成功后，缺少密钥、生成失败或输出校验不通过时保留带状态的 Git 摘要。SpaceMouse、力/力矩、Pico、主从臂及 Python 读写接口和交付形式均无变更。",
+          "en": "This range contains release maintenance only. A new workflow drafts bilingual release notes from a published stable ancestor release using a fixed commit range. It requires `OPENAI_API_KEY`. Drafts are retained as Actions artifacts for 90 days and are not automatically published. After successful preparation, missing credentials, generation failures or output validation failures retain Git summaries with status labels. SpaceMouse, force/torque, Pico, master–follower arms and Python interfaces and delivery forms are unchanged.",
+          "commits": [
+            "2d6f647a6002c5f2dc56c39131af8d42455783cc"
+          ]
+        }
+      ]
+    }
+  ],
+  "uncertainties": [
+    {
+      "zh": "未验证密钥配置或工作流实际运行结果。文档称默认分支每次 push 均触发，但配置仅监听 `main` 和 `feat/pico-readers-and-release`，且要求运行分支为默认分支；其他默认分支名称需调整配置。",
+      "en": "Credential configuration and actual workflow results were not verified. Documentation describes triggering on every default-branch push, but configuration listens only to `main` and `feat/pico-readers-and-release` and requires the running branch to be the default. Other default-branch names require configuration changes."
+    }
+  ]
+}

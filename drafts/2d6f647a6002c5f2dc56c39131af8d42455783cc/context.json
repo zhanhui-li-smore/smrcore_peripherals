@@ -1,0 +1,12 @@
+{
+  "repository": "zhanhui-li-smore/smrcore_peripherals",
+  "base_tag": "v0.0.3",
+  "base_sha": "993cfd6eaa0a6f241e3adfa14ff962f29fde248e",
+  "target_sha": "2d6f647a6002c5f2dc56c39131af8d42455783cc",
+  "commits": [
+    "2d6f647a6002c5f2dc56c39131af8d42455783cc"
+  ],
+  "sdk_version": "0.2.0",
+  "status": "generated",
+  "auth": "local-chatgpt"
+}

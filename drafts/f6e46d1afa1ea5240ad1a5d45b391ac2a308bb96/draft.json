@@ -1,0 +1,132 @@
+{
+  "groups": [
+    {
+      "category": "pico",
+      "entries": [
+        {
+          "zh": "新增 `--single-arm`，通过 SDK `Single` 实例用物理右手柄控制独立单臂，无需左手柄就绪。映射使用 `base`，不使用 B3 支架变换；`--operator-frame face-to-face` 不切换所选手柄。默认仍为双臂 ServoP。",
+          "en": "Add `--single-arm` to control a standalone arm through an SDK `Single` instance using the physical right controller. Left-controller readiness is unnecessary. Mapping uses `base` without the B3 mount transform; `--operator-frame face-to-face` keeps the same selected hand. Dual-arm ServoP remains the default.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "新增 `--single-mapping-yaw`，在单臂模式下绕 base Z 旋转平移和旋转增量。范围为 `[-180,180]` 度，默认 `0`；从 +Z 看，`-90` 表示顺时针旋转。该参数不修改控制柜参考系或 URDF。",
+          "en": "Add `--single-mapping-yaw` to rotate translation and rotation increments around base Z in single-arm mode. Its range is `[-180,180]` degrees, defaulting to `0`; `-90` is clockwise viewed from +Z. It does not modify cabinet frames or URDF.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "新增 `--no-gripper`，跳过 DH 夹爪初始化和 Trigger 控制，适用于单臂及双臂模式。启用夹爪时，单臂模式使用右 Trigger 切换开合；ServoP 下按住右 Grip 时，摇杆 Y 控制 J6。",
+          "en": "Add `--no-gripper` to skip DH gripper initialization and Trigger control in single- and dual-arm modes. With the gripper enabled, single-arm mode uses right Trigger edges to toggle it. In ServoP, thumbstick Y controls J6 while right Grip is held.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "新增单臂 `--control-mode fdcc`。通过 `EnableFdCartesianAdmittance` 进入模式 6，以 Manual 输入和零目标 wrench 调用 `SetFdCartesianAdmittancePoseTarget`，发送频率上限为 50 Hz。此模式禁用摇杆 J6。",
+          "en": "Add single-arm `--control-mode fdcc`. It enters mode 6 through `EnableFdCartesianAdmittance` and calls `SetFdCartesianAdmittancePoseTarget` with Manual input and zero target wrench, at up to 50 Hz. Thumbstick J6 is disabled in this mode.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "新增单臂 `--control-mode impedance`。通过 `EnableCartesianImpedance` 进入模式 5，使用 `SetCartesianImpedanceTarget` 经 DDS 更新平衡点，上限为 200 Hz。`--impedance-stiffness` 和 `--impedance-damping` 接受 XYZ/RX/RY/RZ 六个值，默认分别为 `120,120,120,20,20,20` 和 `20,20,20,1,1,1`。此模式禁用摇杆 J6，不使用 FDCC 虚拟目标放大。",
+          "en": "Add single-arm `--control-mode impedance`. It enters mode 5 through `EnableCartesianImpedance` and updates equilibrium poses through `SetCartesianImpedanceTarget` over DDS, at up to 200 Hz. `--impedance-stiffness` and `--impedance-damping` accept six XYZ/RX/RY/RZ values, defaulting to `120,120,120,20,20,20` and `20,20,20,1,1,1`. Thumbstick J6 and FDCC virtual target extrapolation are disabled.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "FDCC 和阻抗目标从实测 TCP 起步，并限制目标速度和加速度。FDCC 默认平移参数为 `0.30 m/s`、`1.2 m/s²`、跟随增益 `8/s`，目标速度前馈比例为 `0.5`。可用 `--fdcc-target-scale` 启用额外平移前推，最多 30 mm；默认关闭。阻抗默认平移参数为 `0.15 m/s`、`0.6 m/s²`、`8/s`。这些参数控制目标整形，不是实测运动保证。",
+          "en": "FDCC and impedance targets start at measured TCP and have target speed and acceleration limits. FDCC defaults to `0.30 m/s`, `1.2 m/s²`, a following gain of `8/s`, and target velocity feedforward of `0.5`. `--fdcc-target-scale` optionally adds up to 30 mm of translation lead; it is disabled by default. Impedance defaults to `0.15 m/s`, `0.6 m/s²`, and `8/s`. These settings shape targets and do not guarantee measured motion.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "FDCC 和阻抗松开 Grip 后请求退出控制模式，等待模式 0 确认后持位，保持连接和电机使能。重新握紧时从实测 TCP 重新离合。输入断流、跟踪丢失、Jacobian 过期或候选目标被拒绝后，需要新鲜的松 Grip 输入才能恢复；迟到的校验结果不能自动重启。退出程序时请求下使能。",
+          "en": "Releasing Grip in FDCC or impedance requests mode exit and waits for mode 0 before holding, while retaining the connection and motor enable. Re-gripping reanchors from measured TCP. Input loss, tracking loss, stale Jacobian data, or rejected candidates require fresh released-Grip input before resuming; late approvals cannot restart motion. Application exit requests motor disable.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "FDCC 和阻抗将输入收包期限与目标校验期限分开。输入仍新鲜但超过 200 ms 没有新批准结果时，冻结最后发送的平衡点并保留模式；新校验通过后自动继续。两种模式使用实测 Jacobian 减速，不再附加候选端点条件数 60 否决；仍检查有限值、IK 可达性、关节间隙及 FK 一致性。ServoP 保留原候选检查策略。",
+          "en": "FDCC and impedance track input receive deadlines separately from target approvals. With fresh input but no new approval for 200 ms, they freeze the last sent equilibrium while retaining the mode, then resume after a successful check. Both use measured-Jacobian slowdown without the candidate endpoint condition-number-60 veto. Finite-value, IK reachability, joint-clearance, and FK-consistency checks remain. ServoP retains its original candidate-check policy.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "加强 Pico 遥操数值检查：在映射和夹爪边沿处理前拒绝非有限输入及无效四元数，并在 ServoP/ServoJ 发送前检查目标数值。单臂模式不校验未使用的左手柄。模式、整形参数、阻抗 K/D 和映射角度在连接前校验；`--help-advanced` 集中显示调试参数。",
+          "en": "Strengthen numeric checks in Pico teleoperation. Nonfinite input and invalid quaternions are rejected before mapping and gripper-edge processing, and ServoP/ServoJ target values are checked before sending. Single-arm mode ignores the unused left controller. Modes, shaping parameters, impedance K/D, and mapping yaw are validated before connection; `--help-advanced` lists tuning options.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        },
+        {
+          "zh": "新增柔顺模式诊断，区分原始目标误差、虚拟前推、整形差距和跟随误差，并报告目标线角速度、校验等待、IK/FK 耗时及暂停原因。`rpc_ms`/`send_ms` 表示 SDK 调用耗时；DDS 写入没有送达确认，这些字段不表示物理运动延迟。",
+          "en": "Add compliance diagnostics separating raw target error, virtual lead, shaping gap, and following error. Logs also report target linear/angular speed, check waits, IK/FK durations, and pause reasons. `rpc_ms`/`send_ms` measure SDK call duration; DDS writes have no delivery acknowledgement, and these fields do not measure physical motion latency.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        }
+      ]
+    },
+    {
+      "category": "python",
+      "entries": [
+        {
+          "zh": "补充现有 `python/app/app_peripherals_pico_bridge.py` 启动器透传单臂和柔顺模式参数的说明，并扩展参数透传回归用例。控制逻辑位于 C++ bridge；本范围没有新增 Python 读取器或 Python 原生柔顺控制实现。",
+          "en": "Document forwarding single-arm and compliance options through the existing `python/app/app_peripherals_pico_bridge.py` launcher and extend its argument-forwarding regression case. Control logic resides in the C++ bridge; this range adds no Python reader or native Python compliance implementation.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        }
+      ]
+    },
+    {
+      "category": "sdk",
+      "entries": [
+        {
+          "zh": "修复 CMake 共享库使用方通过 `find_package(smrcore_peripherals CONFIG)` 导入时被要求查找私有依赖的问题。共享库配置不再调用 `find_dependency(Threads)` 和 `find_dependency(nlohmann_json)`；静态库仍解析这些依赖，导出目标保持为 `smrcore::peripherals`。",
+          "en": "Fix shared-library consumers being required to discover private dependencies when using `find_package(smrcore_peripherals CONFIG)`. Shared package configuration no longer calls `find_dependency(Threads)` or `find_dependency(nlohmann_json)`. Static packages still resolve both dependencies, and the exported target remains `smrcore::peripherals`.",
+          "commits": [
+            "abe93282b2a87a92ddf010986665f6be9263c656"
+          ]
+        },
+        {
+          "zh": "CI 改为收集整个 `unittests` 目录，并安装 Eigen 头文件以支持新增的离线 Pico 映射、数值输入和柔顺模式生命周期回归用例。发布工作流仍以 `--with-pico OFF` 构建 SDK bridge 包；新增 Pico 控制入口需使用兼容 SDK，通过 `--with-sdk ON --with-pico ON` 从源码构建，并配套更新可执行文件和 `libsmrcore_pico_teleop.so`。",
+          "en": "CI now collects the entire `unittests` directory and installs Eigen headers for the added offline Pico mapping, numeric-input, and compliance lifecycle regression cases. The release workflow still builds SDK bridge packages with `--with-pico OFF`. The new Pico control entry points require a compatible SDK and a source build with `--with-sdk ON --with-pico ON`; update the executable and `libsmrcore_pico_teleop.so` together.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        }
+      ]
+    },
+    {
+      "category": "docs",
+      "entries": [
+        {
+          "zh": "中英文 Pico 指南和应用说明新增独立单臂启动、base Z 映射、FDCC、笛卡尔阻抗、参数范围及暂停恢复说明，并说明 SDK/控制柜要求、诊断字段和源码构建交付方式。",
+          "en": "The Chinese and English Pico guides and application documentation now cover standalone single-arm startup, base-Z mapping, FDCC, Cartesian impedance, parameter ranges, and pause/resume behavior. They also describe SDK/cabinet requirements, diagnostic fields, and source-build delivery.",
+          "commits": [
+            "f6e46d1afa1ea5240ad1a5d45b391ac2a308bb96"
+          ]
+        }
+      ]
+    }
+  ],
+  "uncertainties": [
+    {
+      "zh": "本草稿仅基于指定范围的代码和文档审阅，未运行构建、测试或硬件验证。新增离线用例和 CI 配置不能证明实机跟随、接触行为、CST 切换或物理安全。",
+      "en": "This draft is based only on code and documentation review within the specified range. No builds, tests, or hardware checks were run. Added offline cases and CI configuration do not establish hardware tracking, contact behavior, CST transitions, or physical safety."
+    },
+    {
+      "zh": "文档以 SDK 0.2.0 为构建参照，但本范围不能确认用户取得的已发布 SDK 二进制和目标控制柜均提供所调用的 FDCC/阻抗 API。阻抗所需的 CST 支持、动力学模型及负载配置仍需在目标环境确认。",
+      "en": "Documentation references SDK 0.2.0 for building, but this range does not establish that users' released SDK binaries and target cabinets provide the invoked FDCC/impedance APIs. CST support, dynamics models, and payload configuration for impedance still require confirmation in the target environment."
+    }
+  ]
+}

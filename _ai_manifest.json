@@ -1,4 +1,7 @@
 {
+  "unittests/__init__.py": "unittests/_index.md",
+  "unittests/test_pico_base_yaw.py": "unittests/_index.md",
+  "unittests/test_pico_nonfinite.py": "unittests/_index.md",
   "unittests/test_pico_legacy_release.py": "unittests/_index.md",
   "teleop/legacy_release_stop.hpp": "teleop/_index.md",
   "unittests/test_pico_stop_worker.py": "unittests/_index.md",
@@ -162,5 +165,13 @@
   "docs/maintainers/codex-release-notes.md": "docs/maintainers/_index.md",
   "docs/maintainers/local-codex-notes.md": "docs/maintainers/_index.md",
   "docs/release-baseline.json": "docs/_index.md",
-  "unittests/test_package_release.py": "unittests/_index.md"
+  "unittests/test_package_release.py": "unittests/_index.md",
+  "unittests/test_pico_single_hand.py": "unittests/_index.md",
+  "teleop/pico_fdcc.hpp": "teleop/pico_compliance.md",
+  "teleop/fdcc_target_limiter.hpp": "teleop/_index.md",
+  "unittests/test_pico_fdcc.py": "unittests/_index.md",
+  "teleop/pico_compliance.hpp": "teleop/pico_compliance.md",
+  "teleop/pico_impedance.hpp": "teleop/pico_compliance.md",
+  "unittests/test_pico_impedance.py": "unittests/_index.md",
+  "unittests/test_pico_fdcc_balance.py": "unittests/_index.md"
 }

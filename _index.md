@@ -10,6 +10,10 @@ GitHub `smore-robotics/smrcore_peripherals` 是源码真源。
 
 # Contents
 
+- changelog.d/: monthly retained change fragments; current Pico single-arm
+  entry covers ServoP, FDCC/impedance and input/check lifecycle diagnostics.
+- .gitignore: exclude generated dependencies and build output; keep changelog.d/
+  available for retained release fragments despite the dependency-file *.d rule.
 - README.md / README.en.md: 中英文仓库入口；按源码仓库语义说明构建、SDK 下载、app、Python 和安全要求
 - CMakeLists.txt: 顶层构建/安装/package config；`file(GLOB_RECURSE .../src/*.cpp CONFIGURE_DEPENDS)` 自动收集库源；`smrcore_peripherals` 设置 `EXPORT_NAME peripherals`，安装导出目标为 `smrcore::peripherals`；`install(DIRECTORY src/peripherals/ ... *.hpp)` 安装公开头（排除内部 `sample_model.hpp`）；PICO 协议私有依赖 nlohmann_json；`--with-sdk ON` 时构建原 SDK bridge 与 F/T 标定应用；Pico bridge 另需 `--with-pico ON`；产物 `build_<Type>/bin|lib|install`
 - conanfile.py: Conan 2 包 `rcore-peripherals`；options `shared`/`build_tests`；版本来自 `SMRCORE_PERIPHERALS_VERSION`；nlohmann_json 供 PICO 协议层使用，Eigen 供可选 ServoP bridge app 使用

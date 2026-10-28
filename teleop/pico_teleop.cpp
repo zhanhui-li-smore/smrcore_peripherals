@@ -1,10 +1,10 @@
 /**
  * @file app_peripherals_pico_bridge.cpp
- * @brief PICO 4 双手柄双臂 SDK ServoP 遥操作。
+ * @brief PICO SDK 遥操作：双臂/单臂 ServoP，单臂可选 FDCC。
  *
  * WebXR 页面通过 adb reverse + localhost WebSocket 发送头显和左右手柄位姿。
  * 本外设应用只维护 Grip 离合、坐标映射和最新 TCP 目标；机器人侧继续使用
- * ControllerManager 的 URKinematics、Ruckig 与安全检查。
+ * ControllerManager 的运动学规划或 FDCC 控制律与安全检查。
  */
 
 #include "peripherals/pico/pico.hpp"
@@ -28,6 +28,7 @@
 #include <future>
 #include <limits>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -36,6 +37,8 @@
 #include <vector>
 
 #include "latency_trace.hpp"
+#include "pico_fdcc.hpp"
+#include "pico_impedance.hpp"
 
 namespace
 {
@@ -91,6 +94,10 @@ constexpr double kSingularityMonitorStaleSeconds = 0.25;
 std::mutex session_mutex;
 thread_local std::atomic<bool> *session_running = nullptr;
 using Options = smrcore::peripherals::PicoTeleopOptions;
+using smrcore::peripherals::PicoControlMode;
+using smrcore::peripherals::detail::PicoFdcc;
+using smrcore::peripherals::detail::PicoCompliance;
+using smrcore::peripherals::detail::PicoImpedance;
 
 bool TriggerIsPressed(double trigger, bool was_pressed)
 {
@@ -353,6 +360,17 @@ void LoadEmbeddedMountTransforms(Eigen::Isometry3d &left,
         0.683010447, 0.2765, 0.0, 0.0, 0.0, 1.0;
 }
 
+Eigen::Isometry3d SingleWorldFromBase(double mapping_yaw_deg)
+{
+    Eigen::Isometry3d world_from_base = Eigen::Isometry3d::Identity();
+    // Targets return through world_from_base.inverse(): use the opposite
+    // frame angle to rotate mapped increments by +mapping_yaw_deg in base.
+    world_from_base.linear() = Eigen::AngleAxisd(
+        -mapping_yaw_deg * kPi / 180.0, Eigen::Vector3d::UnitZ())
+                                  .toRotationMatrix();
+    return world_from_base;
+}
+
 struct ArmReference
 {
     bool valid = false;
@@ -431,6 +449,59 @@ bool ResolveDualReferences(rcore::sdk::DualArmRobot &arms, ArmReference &left,
         return false;
     }
     return true;
+}
+
+// Reject malformed inputs before mapping, IK or gripper edge processing.
+template <typename Values>
+bool AllFinite(const Values &values)
+{
+    for (const auto value : values)
+    {
+        if (!std::isfinite(value))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename Pose>
+bool ValidPicoPoseNumbers(const Pose &pose)
+{
+    double norm_squared = 0.0;
+    for (const double value : pose.orientation_xyzw)
+    {
+        norm_squared += value * value;
+    }
+    return AllFinite(pose.position) && AllFinite(pose.orientation_xyzw) &&
+           std::isfinite(norm_squared) && norm_squared >= 1e-18;
+}
+
+bool ValidPicoControllerNumbers(const PicoControllerPose &pose)
+{
+    return ValidPicoPoseNumbers(pose) && std::isfinite(pose.trigger) &&
+           std::isfinite(pose.grip) && AllFinite(pose.thumbstick);
+}
+
+void ValidatePicoPacket(const PicoSample &packet, bool single_arm,
+                        bool head_yaw_clutched)
+{
+    if (!std::isfinite(packet.timestamp_sec))
+    {
+        throw std::runtime_error("PICO invalid receive timestamp");
+    }
+    if (!ValidPicoControllerNumbers(packet.right))
+    {
+        throw std::runtime_error("PICO right: nonfinite input or invalid quaternion");
+    }
+    if (!single_arm && !ValidPicoControllerNumbers(packet.left))
+    {
+        throw std::runtime_error("PICO left: nonfinite input or invalid quaternion");
+    }
+    if (head_yaw_clutched && !ValidPicoPoseNumbers(packet.headset))
+    {
+        throw std::runtime_error("PICO headset: nonfinite input or invalid quaternion");
+    }
 }
 
 Eigen::Matrix3d WebXrFromGrip(const PicoControllerPose &pose)
@@ -944,23 +1015,39 @@ using SelectedPicoStopper = PicoServoStopper;
 class PicoTargetGuard
 {
 public:
+    enum class SingularityPolicy { CandidateBoundary, MeasuredSlowdown };
+    static SingularityPolicy PolicyForControlMode(
+        smrcore::peripherals::PicoControlMode mode)
+    {
+        using Mode = smrcore::peripherals::PicoControlMode;
+        if (mode == Mode::Fdcc || mode == Mode::CartesianImpedance)
+        {
+            return SingularityPolicy::MeasuredSlowdown;
+        }
+        return SingularityPolicy::CandidateBoundary;
+    }
     struct Checked
     {
         bool ready = false;
         int64_t requested_ns = 0;
+        int64_t completed_ns = 0;
+        bool pending = false;
+        double ik_ms = 0.0, fk_ms = 0.0;
         double trace_check_start = 0.0, trace_check_end = 0.0;
         uint64_t trace_sequence = 0;
         double trace_received = 0.0;
     double trace_taken = 0.0, trace_mapped = 0.0;
         Eigen::Isometry3d target = Eigen::Isometry3d::Identity();
+        Eigen::Isometry3d raw_target = Eigen::Isometry3d::Identity();
         Eigen::Vector3d rpy = Eigen::Vector3d::Zero();
         std::array<double, 6> joints{};
         double condition = 0.0;
         std::string blocked_reason;
         std::string error;
     };
-    explicit PicoTargetGuard(rcore::sdk::Robot &robot)
-        : robot_(robot), worker_([this] { Run(); })
+    explicit PicoTargetGuard(rcore::sdk::Robot &robot,
+        SingularityPolicy policy = SingularityPolicy::CandidateBoundary)
+        : robot_(robot), singularity_policy_(policy), worker_([this] { Run(); })
     {
     }
     ~PicoTargetGuard() { Stop(); }
@@ -968,16 +1055,20 @@ public:
     {
         running_.store(false);
         if (worker_.joinable())
+        {
             worker_.join();
+        }
     }
     PicoTargetGuard(const PicoTargetGuard &) = delete;
     PicoTargetGuard &operator=(const PicoTargetGuard &) = delete;
-    void Submit(const HandServoState &hand)
+    void Submit(const HandServoState &hand, const Eigen::Isometry3d *raw_target = nullptr)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         // Identical stream frames must not refresh an old approval's age.
         if (active_ && frame_ == hand.command_frames)
+        {
             return;
+        }
         active_ = true;
         frame_ = hand.command_frames;
         pending_.trace_taken = hand.trace_taken;
@@ -985,11 +1076,14 @@ public:
         pending_.trace_sequence = hand.trace_sequence;
         pending_.trace_received = hand.trace_received;
         pending_.target = hand.target_tcp_reference;
+        pending_.raw_target = raw_target ? *raw_target : hand.target_tcp_reference;
         pending_.rpy = hand.target_rpy;
         pending_.requested_ns = SteadyNowNanoseconds();
         pending_valid_ = true;
         if (!started_ns_)
+        {
             started_ns_ = pending_.requested_ns;
+        }
     }
     void Cancel()
     {
@@ -1008,11 +1102,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto result = checked_;
         const auto now = SteadyNowNanoseconds();
-        if (active_ && result.error.empty() &&
-            now - (result.ready ? result.requested_ns : started_ns_) >
+        const auto checked_ns = singularity_policy_ == SingularityPolicy::MeasuredSlowdown ?
+            result.completed_ns : result.requested_ns;
+        if (active_ && result.error.empty() && result.blocked_reason.empty() &&
+            now - (result.ready ? checked_ns : started_ns_) >
                 200000000)
         {
-            result.blocked_reason = "candidate check pending (>200ms)";
+            result.pending = true;
+            if (singularity_policy_ == SingularityPolicy::CandidateBoundary)
+            {
+                result.blocked_reason = "candidate check pending (>200ms)";
+            }
         }
         return result;
     }
@@ -1023,18 +1123,26 @@ private:
         rcore::sdk::Pose pose;
         auto result = robot_.Motion().ForwardKinematics(q, pose);
         if (!result.IsSuccess())
+        {
             throw std::runtime_error("candidate FK failed");
+        }
         Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
         t.translation() =
             Eigen::Vector3d(pose.tvec()[0], pose.tvec()[1], pose.tvec()[2]);
         t.linear() = EulerZyxToRotation(
             {pose.rvec()[0], pose.rvec()[1], pose.rvec()[2]});
         if (!t.matrix().allFinite())
+        {
             throw std::runtime_error("nonfinite candidate FK");
+        }
         return t;
     }
     void Validate(Checked &c)
     {
+        if (!c.target.matrix().allFinite() || !c.rpy.allFinite())
+        {
+            throw std::runtime_error("candidate Cartesian target nonfinite");
+        }
         rcore::sdk::Pose pose;
         for (int i = 0; i < 3; ++i)
         {
@@ -1042,7 +1150,9 @@ private:
             pose.rvec()[i] = c.rpy[i];
         }
         rcore::sdk::JointPositions q;
+        const auto ik_started_ns = SteadyNowNanoseconds();
         auto result = robot_.Motion().InverseKinematics(pose, q);
+        c.ik_ms = (SteadyNowNanoseconds() - ik_started_ns) / 1e6;
         if (!result.IsSuccess())
         {
             c.blocked_reason = "candidate IK rejected";
@@ -1054,7 +1164,9 @@ private:
         {
             c.joints[i] = q[i];
             if (!std::isfinite(q[i]) || !std::isfinite(state.positions[i]))
+            {
                 throw std::runtime_error("candidate joint nonfinite");
+            }
         }
         // IK continuity is owned by the backend ServoP chain; the client only
         // keeps the elbow/wrist clearance check here.
@@ -1065,12 +1177,25 @@ private:
             c.ready = true;
             return;
         }
+        const auto fk_started_ns = SteadyNowNanoseconds();
         const auto t = Fk(q);
+        c.fk_ms = (SteadyNowNanoseconds() - fk_started_ns) / 1e6;
         if ((t.translation() - c.target.translation()).norm() > 0.001 ||
             Eigen::AngleAxisd(t.linear() * c.target.linear().transpose())
                     .angle() > 0.01)
         {
             c.blocked_reason = "candidate IK/FK mismatch";
+            c.ready = true;
+            return;
+        }
+        // FDCC integrates its own joint state; impedance tracks an equilibrium
+        // pose in torque mode. Neither executes the endpoint IK branch as a
+        // joint trajectory. Use the measured Jacobian slowdown already applied
+        // to the target, not an additional endpoint condition-number veto.
+        // Finite values, IK reachability, clearance and FK consistency above
+        // remain mandatory. This also avoids six sequential FK RPCs per input.
+        if (singularity_policy_ == SingularityPolicy::MeasuredSlowdown)
+        {
             c.ready = true;
             return;
         }
@@ -1123,7 +1248,8 @@ private:
                 {
                     candidate.trace_check_start = SteadyNowNanoseconds() / 1e9;
                     Validate(candidate);
-                    candidate.trace_check_end = SteadyNowNanoseconds() / 1e9;
+                    candidate.completed_ns = SteadyNowNanoseconds();
+                    candidate.trace_check_end = candidate.completed_ns / 1e9;
                 }
             }
             catch (const std::exception &e)
@@ -1135,12 +1261,15 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (generation == generation_ && active_)
+                {
                     checked_ = candidate;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
     rcore::sdk::Robot &robot_;
+    const SingularityPolicy singularity_policy_;
     std::atomic<bool> running_{true};
     std::mutex mutex_;
     Checked pending_, checked_;
@@ -1441,9 +1570,18 @@ bool SendSdkServoPTick(rcore::sdk::Robot &robot, HandServoState &state)
 {
     if (state.joint6_active)
     {
-        if (!state.joint6_target_valid)
+        if (!state.joint6_target_valid ||
+            !std::isfinite(state.joint6_velocity))
         {
             return false;
+        }
+
+        for (size_t joint = 0; joint < 6; ++joint)
+        {
+            if (!std::isfinite(state.joint_target[joint]))
+            {
+                return false;
+            }
         }
 
         if (state.joint6_active)
@@ -1595,7 +1733,7 @@ void UpdateHandTarget(const PicoControllerPose &pose,
                       const SingularitySlowdownStatus &singularity,
                       HandServoState &state)
 {
-    if (!pose.present || !pose.tracked)
+    if (!pose.present || !pose.tracked || !ValidPicoControllerNumbers(pose))
     {
         FreezeHand(robot_state, state, true);
         return;
@@ -1883,16 +2021,16 @@ void UpdateHandTarget(const PicoControllerPose &pose,
     ++state.command_frames;
 }
 
-bool WaitForControllers(Pico &pico, PicoSample &packet)
+bool WaitForControllers(Pico &pico, PicoSample &packet, bool single_right = false)
 {
-    std::cout << "\n等待 PICO 左右手柄进入 WebXR..." << std::endl;
+    std::cout << (single_right ? "\n等待 PICO 右手柄进入 WebXR..." : "\n等待 PICO 左右手柄进入 WebXR...") << std::endl;
     while (session_running->load())
     {
         if (TakePicoSample(pico, packet) &&
             SecondsSince(packet.timestamp_sec) <= kInputStaleSeconds &&
-            packet.left.tracked && packet.right.tracked)
+            (single_right || packet.left.tracked) && packet.right.tracked)
         {
-            std::cout << "左右手柄 6DoF 已就绪，参考空间: "
+            std::cout << (single_right ? "右手柄 6DoF 已就绪，参考空间: " : "左右手柄 6DoF 已就绪，参考空间: ")
                       << packet.reference_space << std::endl;
             return true;
         }
@@ -1901,9 +2039,9 @@ bool WaitForControllers(Pico &pico, PicoSample &packet)
     return false;
 }
 
-bool WaitForReleasedGrips(Pico &pico)
+bool WaitForReleasedGrips(Pico &pico, bool single_right = false)
 {
-    std::cout << "请松开左右 Grip，保持 0.5 秒..." << std::endl;
+    std::cout << (single_right ? "请松开右 Grip，保持 0.5 秒..." : "请松开左右 Grip，保持 0.5 秒...") << std::endl;
     auto released_since = std::chrono::steady_clock::time_point{};
     auto last_print = std::chrono::steady_clock::now();
     PicoSample packet;
@@ -1913,9 +2051,10 @@ bool WaitForReleasedGrips(Pico &pico)
         has_packet = TakePicoSample(pico, packet) || has_packet;
         const bool fresh = has_packet && SecondsSince(packet.timestamp_sec) <=
                                              kInputStaleSeconds;
-        const bool released = fresh && packet.left.tracked &&
+        const bool released = fresh &&
+                              (single_right || (packet.left.tracked &&
+                               packet.left.grip <= kGripReleaseThreshold)) &&
                               packet.right.tracked &&
-                              packet.left.grip <= kGripReleaseThreshold &&
                               packet.right.grip <= kGripReleaseThreshold;
         if (!released)
         {
@@ -1934,9 +2073,9 @@ bool WaitForReleasedGrips(Pico &pico)
         {
             if (fresh)
             {
-                std::cout << "等待松开 Grip: L=" << std::fixed
-                          << std::setprecision(2) << packet.left.grip
-                          << " R=" << packet.right.grip << std::endl;
+                std::cout << "等待松开 Grip: " << std::fixed << std::setprecision(2);
+                if (!single_right) { std::cout << "L=" << packet.left.grip << " "; }
+                std::cout << "R=" << packet.right.grip << std::endl;
             }
             else
             {
@@ -1990,9 +2129,513 @@ bool ValidateHeadYawMapping()
 
 namespace
 {
+// Independent single-arm connection. Only physical right-hand input is used.
+int RunSingleRightSession(const Options &options,
+                          std::array<std::atomic<double>, 16> &diagnostics)
+{
+    const bool use_impedance = options.control_mode == PicoControlMode::CartesianImpedance;
+    const bool use_compliance = options.control_mode != PicoControlMode::ServoP;
+    const char *mode_name = use_impedance ? "Impedance" : use_compliance ? "FDCC" : "ServoP";
+    Pico pico;
+    PicoOptions pico_options;
+    pico_options.port = options.port;
+    if (!pico.Initialize(pico_options) || !pico.Start())
+    {
+        std::cerr << "PICO 服务启动失败: " << pico.GetLastError() << '\n';
+        return 1;
+    }
+    std::cout << "独立单臂 / 物理右手柄 / SDK " << mode_name << " / base 参考系\n"
+              << "单臂映射绕 base Z 偏转: " << options.single_mapping_yaw_deg
+              << " deg；方向基准: "
+              << (options.head_yaw_clutched ? "每次 Grip 锁定头显 yaw" : "WebXR room-fixed")
+              << "；操作者: " << (options.operator_facing_robot ? "face-to-face" : "same-side") << '\n'
+              << "PICO: http://127.0.0.1:" << options.port << "\n"
+              << "adb reverse tcp:" << options.port << " tcp:" << options.port
+              << "\n按住右 Grip 跟随；松开制动。左手柄不参与控制。\n";
+    PicoSample packet;
+    if (!WaitForControllers(pico, packet, true) ||
+        !WaitForReleasedGrips(pico, true))
+    {
+        return 0;
+    }
+    ValidatePicoPacket(packet, true, options.head_yaw_clutched);
+    rcore::sdk::Robot robot;
+    rcore::sdk::RobotOptions robot_options;
+    robot_options.arm_instance = rcore::sdk::RobotArmInstance::Single;
+    if (!robot.Initialize(options.robot_ip, robot_options))
+    {
+        std::cerr << "独立单臂连接失败\n";
+        return 1;
+    }
+    // Declared before workers: exceptions destroy/join workers before stopping
+    // the robot. The guard remains armed until normal teardown completes.
+    struct Cleanup
+    {
+        rcore::sdk::Robot &robot;
+        bool armed = true;
+        ~Cleanup()
+        {
+            if (armed)
+            {
+                try { robot.Motion().StopMotion(); } catch (...) {}
+                try { robot.Disable(); } catch (...) {}
+            }
+        }
+    } cleanup{robot};
+    std::string error;
+    ArmReference reference;
+    if (!EnsureSdkCommandSource(robot, "single", error) ||
+        !ResolveArmReference(robot, robot.GetState(),
+                             SingleWorldFromBase(options.single_mapping_yaw_deg),
+                             reference, error))
+    {
+        std::cerr << error << '\n';
+        return 1;
+    }
+    SelectedPicoStopper stopper;
+    if (!use_compliance && !stopper.Configure(robot))
+    {
+        std::cerr << "无法读取有效的关节制动限制\n";
+        return 1;
+    }
+    if (use_compliance)
+    {
+        if (static_cast<int>(robot.GetState().control_mode) != 0)
+        {
+            std::cerr << mode_name << " 遥操需从运动学持位模式启动（mode=0）\n";
+            return 1;
+        }
+        if (use_impedance)
+        {
+            std::cout << "笛卡尔阻抗 CST；平衡点经 DDS 更新，200Hz 上限\nK=[";
+            for (size_t i = 0; i < 6; ++i)
+            {
+                std::cout << (i ? "," : "") << options.impedance_stiffness[i];
+            }
+            std::cout << "] D=[";
+            for (size_t i = 0; i < 6; ++i)
+            {
+                std::cout << (i ? "," : "") << options.impedance_damping[i];
+            }
+            std::cout << "]；desired_wrench=0；SDK 默认死区/饱和与任务阻尼\n"
+                      << "平移目标上限: " << options.impedance_max_speed << "m/s, "
+                      << options.impedance_max_accel << "m/s2；入口跟随增益="
+                      << options.impedance_follow_gain << "/s\n"
+                      << "转动目标上限: 0.8rad/s, 3rad/s2；无虚拟目标放大\n"
+                      << "松开 Grip 经阻尼退出后持位；重新握紧继续；摇杆 J6 不参与控制。\n";
+        }
+        else
+        {
+            // Read-only compatibility query: preserve the cabinet's calibrated
+            // force source. The backend validates its readiness at activation.
+            const auto source = robot.Control().GetFdCartesianAdmittanceWrenchSource();
+            std::cout << "FDCC force_source=" << static_cast<int>(source)
+                      << "（沿用柜子配置）；SDK 默认参数，tracking_error_limit=0.1rad\n"
+                      << "FDCC 平移目标上限: " << options.fdcc_max_speed << "m/s, "
+                      << options.fdcc_max_accel << "m/s2；入口跟随增益=" << options.fdcc_follow_gain
+                      << "/s；虚拟目标倍数=" << options.fdcc_target_scale << '\n'
+                      << "目标速度前馈=" << options.fdcc_target_feedforward
+                      << "；实测姿态渐进减速，候选目标不按条件数 60 暂停\n"
+                      << "转动目标上限: 0.8rad/s, 3rad/s2；50Hz RPC\n"
+                      << "松开 Grip 退出 FDCC 持位，重新握紧继续；摇杆 J6 不参与控制。\n";
+        }
+    }
+    if (!session_running->load()) { return 0; }
+    auto enabled = robot.Enable();
+    if (!enabled.IsSuccess())
+    {
+        std::cerr << "单臂使能失败: " << enabled.GetErrorMsg() << '\n';
+        return 1;
+    }
+    HandServoState hand;
+    const auto initial_state = robot.GetState();
+    if (!SetTargetFromRobotState(initial_state, hand))
+    {
+        std::cerr << "单臂 TCP 状态无效\n";
+        return 1;
+    }
+    std::unique_ptr<PicoCompliance> compliance;
+    if (use_impedance)
+    {
+        compliance = std::make_unique<PicoImpedance>(robot, options.impedance_stiffness,
+            options.impedance_damping, options.impedance_max_speed,
+            options.impedance_max_accel, options.impedance_follow_gain);
+    }
+    else if (use_compliance)
+    {
+        compliance = std::make_unique<PicoFdcc>(robot, options.fdcc_max_speed,
+            options.fdcc_max_accel, options.fdcc_follow_gain, options.fdcc_target_feedforward);
+    }
+    EndBoardDhGripper gripper(robot, "单臂夹爪");
+    if (options.enable_gripper &&
+        !gripper.Initialize(options.gripper_force, options.gripper_speed))
+    {
+        return 1;
+    }
+    SingularitySlowdownMonitor singularity_monitor(robot);
+    singularity_monitor.Start();
+    if (!singularity_monitor.WaitForInitialSample(std::chrono::seconds(1)))
+    {
+        std::cerr << "未取得有效 Jacobian\n";
+        return 1;
+    }
+    PicoTargetGuard guard(robot,
+        PicoTargetGuard::PolicyForControlMode(options.control_mode));
+    RobotStateFreshnessWatchdog watchdog;
+    (void)watchdog.Observe(initial_state, std::chrono::steady_clock::now());
+    bool input_was_fresh = false;
+    bool singularity_was_fresh = true;
+    bool trigger_pressed = true; // Require release before first gripper toggle.
+    bool gripper_closed = false;
+    bool fault = false;
+    uint64_t last_sequence = packet.sequence;
+    auto next_tick = std::chrono::steady_clock::now();
+    auto last_print = next_tick;
+    auto last_compliance_phase = PicoCompliance::Phase::Holding;
+    bool last_rearm_required = false;
+    auto last_input_loop = std::chrono::steady_clock::now();
+    while (session_running->load())
+    {
+        const auto input_loop_now = std::chrono::steady_clock::now();
+        const double input_loop_gap_ms = std::chrono::duration<double, std::milli>(
+            input_loop_now - last_input_loop).count();
+        last_input_loop = input_loop_now;
+        (void)TakePicoSample(pico, packet);
+        ValidatePicoPacket(packet, options.single_arm, options.head_yaw_clutched);
+        const auto state = robot.GetState();
+        const auto singularity = singularity_monitor.Snapshot();
+        const auto compliance_status = compliance ? compliance->Snapshot() : PicoCompliance::Status{};
+        if (compliance && !compliance_status.error.empty())
+        {
+            std::cerr << mode_name << " 遥操停止: " << compliance_status.error << '\n';
+            fault = true;
+            break;
+        }
+        if (compliance && compliance_status.phase != last_compliance_phase)
+        {
+            if (compliance_status.phase == PicoCompliance::Phase::Active)
+            {
+                std::cout << mode_name << " active: mode=" << (use_impedance ? 5 : 6) << "，右手柄跟随\n";
+            }
+            else if (compliance_status.phase == PicoCompliance::Phase::Holding)
+            {
+                std::cout << mode_name << " paused: mode=0，持位等待重新握紧 Grip\n";
+            }
+            last_compliance_phase = compliance_status.phase;
+        }
+        if (state.errors.GetLatchedErrorCount() > 0 ||
+            !watchdog.Observe(state, std::chrono::steady_clock::now()) ||
+            state.reference_frame != reference.name)
+        {
+            std::cerr << "单臂状态过期、参考系改变或锁存错误，结束遥操\n";
+            fault = true;
+            break;
+        }
+        const bool input_connected = pico.IsConnected();
+        const double input_age_ms = 1000.0 * SecondsSince(packet.timestamp_sec);
+        const bool fresh = input_connected && packet.right.tracked &&
+                           input_age_ms <= 1000.0 * kInputStaleSeconds;
+        const auto print_input_health = [&] {
+            std::cout << " connected=" << input_connected
+                      << " tracked=" << packet.right.tracked
+                      << " input_age_ms=" << input_age_ms
+                      << " input_seq=" << packet.sequence
+                      << " loop_gap_ms=" << input_loop_gap_ms;
+        };
+        if (compliance && compliance_status.rearm_required)
+        {
+            if (!last_rearm_required)
+            {
+                std::cout << mode_name << " pause reason: " << compliance_status.pause_reason
+                          << "; release Grip before resuming";
+                print_input_health();
+                std::cout << '\n';
+            }
+            guard.Cancel();
+            FreezeHand(state, hand, true);
+            if (fresh && packet.right.grip <= kGripReleaseThreshold &&
+                compliance->AcknowledgeGripRelease())
+            {
+                hand.require_release = false;
+            }
+        }
+        last_rearm_required = compliance && compliance_status.rearm_required;
+        if ((!fresh && input_was_fresh) ||
+            singularity.fresh != singularity_was_fresh)
+        {
+            FreezeHand(state, hand, use_compliance);
+            gripper.CancelPending();
+        }
+        if (!fresh) { trigger_pressed = true; }
+        singularity_was_fresh = singularity.fresh;
+        if (fresh && packet.sequence != last_sequence)
+        {
+            if (singularity.fresh && (!compliance || compliance_status.phase != PicoCompliance::Phase::Stopping))
+            {
+                auto right = packet.right;
+                if (use_compliance)
+                {
+                    // No J6 ServoJ while a compliance mode owns the robot.
+                    right.thumbstick = {0.0, 0.0};
+                }
+                UpdateHandTarget(right, packet.headset, state, reference,
+                                 options.enable_rotation, options.head_yaw_clutched,
+                                 options.translation_scale, options.rotation_scale,
+                                 use_compliance ? 0.0 : stopper.LimitJ6Speed(options.j6_thumbstick_speed),
+                                 options.operator_facing_robot, singularity, hand);
+            }
+            const bool pressed = TriggerIsPressed(packet.right.trigger, trigger_pressed);
+            if (options.enable_gripper && pressed && !trigger_pressed)
+            {
+                if (gripper.Move(!gripper_closed)) { gripper_closed = !gripper_closed; }
+            }
+            trigger_pressed = pressed;
+            last_sequence = packet.sequence;
+        }
+        input_was_fresh = fresh;
+        bool ok = true;
+        if (compliance && (hand.stop_requested || !fresh || !singularity.fresh ||
+                     compliance_status.phase == PicoCompliance::Phase::Stopping))
+        {
+            if (compliance_status.phase == PicoCompliance::Phase::Active ||
+                compliance_status.phase == PicoCompliance::Phase::Starting)
+            {
+                const char *reason = !input_connected ? "Pico WebSocket disconnected" :
+                    !packet.right.tracked ? "Pico right-hand tracking lost" :
+                    !fresh ? "Pico sample age exceeded 250ms" :
+                    !singularity.fresh ? "Jacobian stale" : "Grip released / clutch stopped";
+                std::cout << mode_name << " pause reason: " << reason;
+                print_input_health();
+                std::cout << '\n';
+            }
+            guard.Cancel();
+            compliance->Pause();
+            FreezeHand(state, hand, !fresh || !singularity.fresh);
+            hand.stop_requested = false;
+        }
+        else if (!compliance && (hand.stop_requested || stopper.Pending()))
+        {
+            guard.Cancel();
+            if (hand.stop_requested) { stopper.Request(robot, hand.stop_from_joint6); }
+            FreezeHand(state, hand, false);
+            hand.stop_requested = false;
+            std::string stop_error;
+            if (stopper.Poll(stop_error) && !stop_error.empty())
+            {
+                std::cerr << "单臂制动失败: " << stop_error << '\n';
+                ok = false;
+            }
+        }
+        else if (!compliance && hand.joint6_active)
+        {
+            guard.Cancel();
+            ok = SendSdkServoPTick(robot, hand);
+        }
+        else if (!hand.active || !hand.servop_stream_started)
+        {
+            guard.Cancel();
+            if (compliance)
+            {
+                compliance->Pause();
+            }
+            ok = guard.Snapshot().error.empty();
+        }
+        else
+        {
+            if (compliance)
+            {
+                // Receive timestamp belongs to the current packet. A slow
+                // guard must not look like input loss, nor keep dead input alive.
+                compliance->UpdateInputDeadline(PicoCompliance::Clock::time_point(
+                    std::chrono::duration_cast<PicoCompliance::Clock::duration>(
+                        std::chrono::duration<double>(packet.timestamp_sec + kInputStaleSeconds))));
+                auto candidate = hand;
+                Eigen::Isometry3d measured;
+                if (!GetTcpInReference(state, measured))
+                {
+                    throw std::runtime_error("compliance target requires finite measured TCP");
+                }
+                // One candidate per input frame: repeated feedback cannot keep
+                // stale hand input approved. Never overwrite the raw anchor.
+                candidate.target_tcp_reference = smrcore::peripherals::detail::MakeFdccVirtualTarget(
+                    hand.target_tcp_reference, measured, use_impedance ? 1.0 : options.fdcc_target_scale);
+                guard.Submit(candidate, &hand.target_tcp_reference);
+            }
+            else
+            {
+                guard.Submit(hand);
+            }
+            const auto checked = guard.Snapshot();
+            if (!checked.error.empty())
+            {
+                std::cerr << "单臂目标校验失败: " << checked.error << '\n';
+                ok = false;
+            }
+            else if (checked.ready && checked.blocked_reason.empty() && !checked.pending)
+            {
+                HandServoState approved = hand;
+                approved.target_tcp_reference = checked.target;
+                approved.target_rpy = checked.rpy;
+                if (compliance)
+                {
+                    const auto valid_until = PicoCompliance::Clock::time_point(
+                        std::chrono::nanoseconds(checked.completed_ns)) + std::chrono::milliseconds(200);
+                    compliance->Submit(approved.target_tcp_reference, valid_until, checked.raw_target);
+                }
+                else
+                {
+                    ok = SendSdkServoPTick(robot, approved);
+                }
+            }
+            else if (compliance && !checked.blocked_reason.empty() &&
+                             (compliance_status.phase == PicoCompliance::Phase::Active ||
+                              compliance_status.phase == PicoCompliance::Phase::Starting))
+            {
+                // A rejected candidate requires release; a delayed check only
+                // freezes the equilibrium in the worker and resumes on approval.
+                std::cout << mode_name << " pause reason: " << (checked.blocked_reason.empty() ?
+                    "candidate not ready" : checked.blocked_reason) << '\n';
+                compliance->PauseUntilRelease(checked.blocked_reason.empty() ?
+                    "candidate not ready" : checked.blocked_reason);
+                guard.Cancel();
+                FreezeHand(state, hand, true);
+                hand.stop_requested = false;
+            }
+        }
+        if (!ok) { fault = true; break; }
+        for (size_t i = 0; i < 6; ++i)
+        {
+            diagnostics[6 + i].store(state.positions[i], std::memory_order_relaxed);
+        }
+        diagnostics[13].store(singularity.condition_number, std::memory_order_relaxed);
+        diagnostics[15].store(hand.singularity_scale, std::memory_order_relaxed);
+        if (SecondsSince(last_print) >= 1.0)
+        {
+            PrintArmDiagnostics("single/right-hand", packet.right, state, hand,
+                                reference, singularity);
+            if (compliance)
+            {
+                const auto checked = guard.Snapshot();
+                std::cout << mode_name << " sent=" << compliance_status.sent
+                          << (use_impedance ? " send_ms=" : " rpc_ms=")
+                          << compliance_status.call_ms << " guard_age_ms=" << compliance_status.guard_age_ms
+                          << " raw_err_mm=" << compliance_status.raw_error_mm
+                          << " lead_mm=" << compliance_status.lead_mm
+                          << " shape_gap_mm=" << compliance_status.shape_gap_mm
+                          << " follow_err_mm=" << compliance_status.follow_error_mm
+                          << " v_target=" << compliance_status.target_speed_mps << "m/s"
+                          << " shape_deg=" << compliance_status.shape_gap_deg
+                          << " follow_deg=" << compliance_status.follow_error_deg
+                          << " w_target=" << compliance_status.target_angular_speed_rps << "rad/s"
+                          << " check=" << (compliance_status.waiting_for_check ? "WAIT" : "OK")
+                          << " ik_ms=" << checked.ik_ms << " fk_ms=" << checked.fk_ms
+                          << " check_queue_ms=" << (checked.trace_check_start > 0.0 ?
+                              1000.0 * (checked.trace_check_start - checked.requested_ns / 1e9) : 0.0)
+                          << '\n';
+            }
+            last_print = std::chrono::steady_clock::now();
+        }
+        next_tick += kServoPeriod;
+        const auto now = std::chrono::steady_clock::now();
+        if (next_tick < now - kServoPeriod) { next_tick = now; }
+        std::this_thread::sleep_until(next_tick);
+    }
+    if (compliance)
+    {
+        compliance->Stop();
+        const auto final_status = compliance->Snapshot();
+        if (!final_status.error.empty())
+        {
+            std::cerr << mode_name << " 退出: " << final_status.error << '\n';
+            fault = true;
+        }
+    }
+    if (fault) { robot.Motion().StopMotion(); }
+    stopper.Wait();
+    guard.Stop();
+    singularity_monitor.Stop();
+    gripper.Stop();
+    if (compliance)
+    {
+        // Mode exit has reset the planner to measured joints. Wait for
+        // standstill without sending ServoP/ServoJ into this control path.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!fault && !JointsNearStill(robot.GetState()) &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        auto result = robot.Disable();
+        const auto motors = robot.Control().GetMotorStatus();
+        PrintDisableStatus(use_impedance ? "single Impedance" : "single FDCC", result, motors);
+        if (!result.IsSuccess() || motors.enabled)
+        {
+            fault = true;
+            std::cerr << mode_name << " 退出下使能未确认，请在控制柜确认停止状态\n";
+        }
+    }
+    else if (fault)
+    {
+        robot.Disable();
+    }
+    else
+    {
+        HoldThenDisable(robot, "single");
+    }
+    cleanup.armed = false;
+    robot.Shutdown();
+    pico.Stop();
+    return fault ? 1 : 0;
+}
+
 int RunSession(const Options &options,
                std::array<std::atomic<double>, 16> &diagnostics)
 {
+    const Options defaults;
+    if (!smrcore::peripherals::detail::ValidTargetFeedforward(options.fdcc_target_feedforward) ||
+        !smrcore::peripherals::detail::ValidFdccShaping(options.fdcc_max_speed,
+            options.fdcc_max_accel, options.fdcc_follow_gain, options.fdcc_target_scale) ||
+        (options.control_mode != PicoControlMode::Fdcc &&
+         (options.fdcc_max_speed != defaults.fdcc_max_speed ||
+          options.fdcc_max_accel != defaults.fdcc_max_accel ||
+          options.fdcc_follow_gain != defaults.fdcc_follow_gain ||
+          options.fdcc_target_scale != defaults.fdcc_target_scale ||
+          options.fdcc_target_feedforward != defaults.fdcc_target_feedforward)))
+    {
+        std::cerr << "FDCC 参数仅用于 --control-mode fdcc：speed [0.01,0.5]m/s, "
+                     "accel [0.05,2]m/s2, follow_gain [1,40]/s, target_scale [1,3], "
+                     "target_feedforward [0,1]\n";
+        return 2;
+    }
+    if (!smrcore::peripherals::detail::ValidImpedanceGains(options.impedance_stiffness,
+            options.impedance_damping) ||
+        !smrcore::peripherals::detail::ValidFdccShaping(options.impedance_max_speed,
+            options.impedance_max_accel, options.impedance_follow_gain, 1.0) ||
+        (options.control_mode != PicoControlMode::CartesianImpedance &&
+         (options.impedance_stiffness != defaults.impedance_stiffness ||
+          options.impedance_damping != defaults.impedance_damping ||
+          options.impedance_max_speed != defaults.impedance_max_speed ||
+          options.impedance_max_accel != defaults.impedance_max_accel ||
+          options.impedance_follow_gain != defaults.impedance_follow_gain)))
+    {
+        std::cerr << "阻抗参数仅用于 --control-mode impedance；K/D 与速度参数须在帮助所示范围内\n";
+        return 2;
+    }
+    if ((options.control_mode != PicoControlMode::ServoP &&
+         options.control_mode != PicoControlMode::Fdcc &&
+         options.control_mode != PicoControlMode::CartesianImpedance) ||
+        (options.control_mode != PicoControlMode::ServoP && !options.single_arm))
+    {
+        std::cerr << "--control-mode fdcc/impedance 目前仅支持 --single-arm 独立单臂\n";
+        return 2;
+    }
+    if (!std::isfinite(options.single_mapping_yaw_deg) ||
+        std::abs(options.single_mapping_yaw_deg) > 180.0 ||
+        (!options.single_arm && options.single_mapping_yaw_deg != 0.0))
+    {
+        std::cerr << "--single-mapping-yaw 仅用于单臂，必须是 [-180, 180] 内的有限角度\n";
+        return 2;
+    }
     if (!options.enable_motion || options.robot_ip.empty() ||
         options.port == 0 || !std::isfinite(options.translation_scale) ||
         options.translation_scale < 0.1 || options.translation_scale > 3.0 ||
@@ -2000,13 +2643,22 @@ int RunSession(const Options &options,
         options.rotation_scale < 0.1 || options.rotation_scale > 3.0 ||
         options.gripper_force < 20 || options.gripper_force > 100 ||
         options.gripper_speed == 0 || options.gripper_speed > 100)
+    {
         return 2;
+    }
     if (!session_running->load())
+    {
         return 0;
+    }
     if (!ValidateHeadYawMapping())
     {
         std::cerr << "PICO 头显 yaw 坐标映射自检失败" << std::endl;
         return 1;
+    }
+
+    if (options.single_arm)
+    {
+        return RunSingleRightSession(options, diagnostics);
     }
 
     Eigen::Isometry3d world_from_left_base = Eigen::Isometry3d::Identity();
@@ -2059,6 +2711,7 @@ int RunSession(const Options &options,
         pico.Stop();
         return 0;
     }
+    ValidatePicoPacket(first_packet, false, options.head_yaw_clutched);
     if (!WaitForReleasedGrips(pico))
     {
         pico.Stop();
@@ -2185,9 +2838,9 @@ int RunSession(const Options &options,
     }
     EndBoardDhGripper left_gripper(arms.left_robot(), "左臂夹爪");
     EndBoardDhGripper right_gripper(arms.right_robot(), "右臂夹爪");
-    if (!left_gripper.Initialize(options.gripper_force,
+    if (options.enable_gripper && (!left_gripper.Initialize(options.gripper_force,
                                  options.gripper_speed) ||
-        !right_gripper.Initialize(options.gripper_force, options.gripper_speed))
+        !right_gripper.Initialize(options.gripper_force, options.gripper_speed)))
     {
         left_gripper.Stop();
         right_gripper.Stop();
@@ -2264,6 +2917,7 @@ int RunSession(const Options &options,
     while (session_running->load(std::memory_order_acquire))
     {
         (void)TakePicoSample(pico, packet);
+        ValidatePicoPacket(packet, options.single_arm, options.head_yaw_clutched);
         const double trace_taken = SteadyNowNanoseconds() / 1e9;
         const bool fresh =
             pico.IsConnected() &&
@@ -2409,7 +3063,7 @@ int RunSession(const Options &options,
                 TriggerIsPressed(left_controller.trigger, left_trigger_pressed);
             const bool next_right_trigger = TriggerIsPressed(
                 right_controller.trigger, right_trigger_pressed);
-            if (next_left_trigger && !left_trigger_pressed)
+            if (options.enable_gripper && next_left_trigger && !left_trigger_pressed)
             {
                 const bool next_closed = !left_gripper_closed;
                 if (left_gripper.Move(next_closed))
@@ -2417,7 +3071,7 @@ int RunSession(const Options &options,
                     left_gripper_closed = next_closed;
                 }
             }
-            if (next_right_trigger && !right_trigger_pressed)
+            if (options.enable_gripper && next_right_trigger && !right_trigger_pressed)
             {
                 const bool next_closed = !right_gripper_closed;
                 if (right_gripper.Move(next_closed))

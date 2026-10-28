@@ -15,7 +15,8 @@ def test_arguments_and_exit_status(tmp_path):
                       f'Path({str(output)!r}).write_text(json.dumps(sys.argv[1:]))\n'
                       'sys.exit(7)\n')
     bridge.chmod(0o755)
-    args = ['--robot-ip', 'literal;$(echo no)', '--gripper-force', '80']
+    args = ['--robot-ip', 'literal;$(echo no)', '--gripper-force', '80',
+            '--single-arm', '--no-gripper']
     result = subprocess.run([sys.executable, str(LAUNCHER), '--bridge-executable',
                              str(bridge), *args], capture_output=True, text=True)
     assert result.returncode == 7

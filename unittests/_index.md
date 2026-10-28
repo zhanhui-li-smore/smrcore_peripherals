@@ -1,5 +1,35 @@
 > DIR: unittests/
 
+- test_pico_fdcc_balance.py: production mode-policy selector + guard + workers,
+  high-condition candidate keeps FDCC/mode-6 and impedance/mode-5 active with
+  one FK per candidate; ServoP still rejects with seven FK calls.
+  IK/FK/finite/clearance errors retained in both compliance modes.
+  Injected 300ms IK delay retains the mode with a fixed last-sent target;
+  completion resumes without release. Stale input still latches an exit,
+  and late approvals cannot restart it. IK/queue timing uses separate clocks.
+  Ramp/sine comparisons record lag and stopping overshoot; rotation wrap,
+  repeated/delayed/reversed timestamps, reset and unchanged velocity/accel limits.
+
+- test_pico_impedance.py: production adapter/shared worker with impedance-only
+  fake SDK; K/D propagation and bounds, mode/source acknowledgement, measured
+  seed/reclutch, slow damping exit, ownership loss, faults/NaN, expiry hold and
+  release acknowledgement, in-flight
+  cancellation and DDS write failure. Full CLI parser tested without network.
+  CLI also verifies the short FDCC command's built-in profile and normal/advanced
+  help separation, preserving impedance defaults and legacy explicit overrides.
+- test_pico_fdcc.py: production worker + mock SDK: pause/reclutch, delayed
+  acknowledgements, canceled in-flight activation, failures/mode loss/stale
+  feedback, bounded target rate, expiry and no ServoP/ServoJ calls. Limiter
+  regression exercises guard-first/worker-first expiry, late approvals, release
+  during mode exit, reanchor after acknowledgement and expiry during activation.
+  covers reversal, rotation wrap, scheduler stalls, convergence and NaN.
+  Configured response tests compare ramp/sine target lag, preserve rate limits
+  and settings on reset; virtual targets cover sign, dead zone, continuity,
+  lead cap, unchanged orientation and invalid inputs. No robot motion.
+
+- test_pico_base_yaw.py: production mapping/parser, clockwise sign, Z invariance,
+  unchanged nonzero TCP anchor and conjugated rotation; no SDK or hardware.
+
 - test_pico_legacy_release.py: offline comparison-stop tests; 100 fixed-target
   frames, separate TCP/J6 paths, stale/fault/invalid feedback rejection.
 
@@ -9,6 +39,8 @@
 
 # Contents
 
+- __init__.py: package marker so shared fake-SDK fixtures import under pytest
+  and unittest; CI collects the complete offline test directory.
 - ut_spacemouse_sample_model.cpp: 轴映射/符号/死区、夹爪锁存（含双键冲突保持）、定频 consume-on-read
 - ut_kunwei_parser.cpp: 坤维 `KunweiParser` 帧解析与 `DrainLatest`
 - ut_ft_sensor_options.cpp: `FtSensor::Initialize(FtSensorOptions)` 后 `GetInfo()` 字段（路径/型号/采样率）
@@ -35,3 +67,7 @@
 - test_version_history.py: reviewed range deduplication and historical target isolation.
 
 - test_package_release.py: user guide allowlist excludes maintenance, templates and AI indices. test_version_history.py checks public baseline and historical tag isolation.
+
+- test_pico_single_hand.py: runs actual startup gates with right-only, absent/stale right and held-Grip inputs; no hardware. Python launcher tests include single-arm/gripper flags.
+
+- test_pico_nonfinite.py: injects NaN/Inf and invalid quaternions into actual preflight/send helpers; asserts invalid targets never call the mock SDK.

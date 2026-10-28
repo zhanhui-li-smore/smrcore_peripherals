@@ -106,3 +106,32 @@ SpaceMouse 遥操同样**不会**由 SDK 示例直接打开 `/dev/input/*`，必
 ## Pico
 
 [Pico 读取、B3 双臂遥操、夹爪与参数完整说明](../docs/site/pico.zh.md)。需要 `--with-sdk ON --with-pico ON` 和匹配双臂 SDK。默认发布包不含此程序。
+
+## 独立 i3 单臂：Pico 右手柄
+
+在同一 bridge 中增加 `--single-arm`，连接 SDK 的 `Single` 实例。
+物理右手柄控制单臂，不需要左手柄就绪；以机器人 `base` 为参考系，
+不使用 B3 支架变换。`--operator-frame face-to-face` 只改变映射方向，
+单臂模式仍选择物理右手柄。
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --single-arm --robot-ip <单臂IP> --enable-motion --no-gripper
+```
+
+未安装 DH 夹爪时使用 `--no-gripper`；有夹爪时去掉该参数，
+右 Trigger 按下沿切换开合。右 Grip 控制离合，按住 Grip 时摇杆 Y 控制 J6。
+松开 Grip、右手柄断流或丢失跟踪时制动；重连后从当前 TCP 重新离合。
+保留奇异位形减速、目标预检、状态过期/锁存错误停止及退出下使能。
+默认使用 ServoP；单臂可通过 `--control-mode fdcc` 或 `--control-mode impedance`
+选择 FDCC 或笛卡尔阻抗。默认不加 `--single-arm` 时仍运行双臂 ServoP。
+
+Python 启动入口原样透传参数：
+
+```bash
+python3 python/app/app_peripherals_pico_bridge.py \
+  --single-arm --robot-ip <单臂IP> --enable-motion --no-gripper
+```
+
+参数及暂停/退出行为见 [FDCC 使用说明](../docs/site/pico.zh.md#单臂-fdcc-遥操)
+和 [笛卡尔阻抗使用说明](../docs/site/pico.zh.md#单臂笛卡尔阻抗遥操)。

@@ -90,13 +90,13 @@ jobs:
       - name: Build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ patchelf
+          sudo apt-get install -y cmake ninja-build g++ patchelf libeigen3-dev
           python -m pip install 'conan>=2,<3' pytest numpy
       - name: Build readers and tests without robot SDK
         run: |
           ./scripts/build.sh --with-sdk OFF --tests ON
           ./scripts/run_tests.sh -t Release
-          python -m pytest unittests/test_pico_legacy_release.py unittests/test_pico_stop_worker.py unittests/test_zhonglin.py unittests/test_pico_python_launcher.py unittests/test_weekly_release.py unittests/test_release_notes.py unittests/test_package_release.py unittests/test_version_history.py unittests/test_codex_release_notes.py unittests/test_local_codex_notes.py -q
+          python -m pytest unittests -q
           ./scripts/check_python_examples.sh
       - name: Build and test wheel
         run: |

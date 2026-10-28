@@ -110,3 +110,28 @@ default dual-peripheral bridge) via
 ## Pico
 
 [Complete Pico reading, B3 teleoperation, gripper and CLI guide](../docs/site/pico.md). Requires `--with-sdk ON --with-pico ON` and matching dual-arm SDK. Default packages exclude this executable.
+
+## Standalone i3: physical right Pico controller
+
+Pass `--single-arm` to connect one SDK `Single` instance. Only the physical
+right controller is required. Mapping uses the robot `base` frame with no B3
+mount transform. `--operator-frame face-to-face` changes mapping direction,
+but never swaps the selected hand in single-arm mode.
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --single-arm --robot-ip <single-arm-ip> --enable-motion --no-gripper
+```
+
+Use `--no-gripper` when no DH gripper is installed; otherwise omit it to retain
+right Trigger gripper toggling. Right Grip clutches motion and thumbstick Y
+controls J6 while Grip is held. Release, stale input or right tracking loss
+brakes motion. Existing singularity slowdown, target preflight, state/fault
+checks and disable-on-exit remain active. ServoP is the default;
+`--control-mode fdcc` or `--control-mode impedance` selects single-arm FDCC
+or Cartesian impedance.
+The default mode remains dual-arm. The Python launcher forwards these same flags.
+
+See [FDCC usage](../docs/site/pico.md#single-arm-fdcc-teleoperation) and
+[Cartesian impedance usage](../docs/site/pico.md#single-arm-cartesian-impedance-teleoperation)
+for parameters and pause/exit behavior.

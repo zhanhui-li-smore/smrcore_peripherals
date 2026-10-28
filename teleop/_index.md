@@ -1,8 +1,58 @@
 > DIR: teleop/
 > SRC: pico_teleop.cpp
 > SRC: legacy_release_stop.hpp
+> SRC: pico_fdcc.hpp, fdcc_target_limiter.hpp
+> REF: pico_compliance.md
 
 # PICO teleoperation core
+
+- Single-arm `CartesianImpedance` shares the compliance worker/clutch/guard
+  lifecycle; mode 5, Manual equilibrium targets through the SDK DDS API at
+  up to 200Hz. Configurable six-axis K/D and translation shaping, no virtual
+  extrapolation. Shares measured-Jacobian slowdown with FDCC; reachable
+  high-condition candidate endpoints no longer latch a pause, avoiding six
+  extra FK RPCs per candidate. Finite/IK/clearance/FK and expiry checks remain.
+  Release waits for backend damping exit to mode 0; faults,
+  ownership loss and stale feedback end the session. Details: pico_compliance.md.
+
+- Single-arm `control_mode=Fdcc` uses `PicoFdcc`: latest approved target only,
+  a dedicated non-RT RPC worker (50 Hz maximum), generation cancellation on
+  release, mode-6 acknowledgement before pose writes, and mode-0 acknowledgement
+  before reclutch. No ServoP/ServoJ fallback or persistent force-source write.
+  SDK default FDCC params and zero target wrench; actual contact force is not
+  constrained to zero. First target after each activation is measured TCP.
+  FDCC's built-in input profile is 0.30m/s, 1.2m/s², gain 8/s; configurable
+  translation speed/accel/gain, fixed rotation 0.8rad/s, 3rad/s². Elapsed
+  integration capped at 20ms; Reset retains config and reanchors at measured TCP.
+  FDCC adds target velocity feedforward (default 0.5, range 0..1; impedance 0).
+  Uses check-completion timestamp deltas, 40ms filtering, same output rate/accel
+  bounds; repeat samples decay, >100ms gaps discard derivative, reset clears it.
+  Reduces moving-target shaping lag; faster stopping can increase overshoot.
+  Generic limiter/impedance defaults remain 0.15m/s, 0.6m/s². FDCC-only option
+  checks compare against `PicoTeleopOptions` defaults to keep other modes valid.
+  FDCC guard uses measured-Jacobian slowdown instead of endpoint condition >=60
+  rejection (six candidate FK probes omitted). IK/finite/clearance/FK consistency
+  still required. ServoP keeps candidate condition checks.
+  Optional `MakeFdccVirtualTarget` extrapolates translation before guard, once
+  per input frame; 15mm dead zone, smooth 15..30mm onset, extra lead <=30mm.
+  Virtual lead leaves the raw target/clutch anchor and orientation unchanged. No approval-age refresh
+  from feedback-only changes. Worker snapshots include raw/lead/shaping/follow
+  errors, angular shaping/follow errors and commanded linear/angular speed;
+  no claim of measured plant response/latency.
+  Activation consumes a fresh approved slot before the first pose write.
+  Rejected candidates or input/Jacobian loss pause to hold and require release.
+  Approval expiry freezes the last sent equilibrium without leaving the mode
+  while original packet receive deadlines remain fresh. New approvals resume
+  automatically; validity starts at check completion, not request submission.
+  IK/FK/queue timing and check=WAIT expose delayed validation. A shared rearm
+  latch after a real pause rejects late approvals until fresh released Grip and mode-0 confirmation;
+  the main loop clears its mapping anchor before accepting the next press.
+  Input pauses distinguish WebSocket disconnect, tracking loss and >250ms
+  sample age; log sequence/age/loop gap and worker deadline overrun separately.
+  mode loss, stale robot feedback, RPC failure or target RPC >200ms exits.
+  In-flight RPC cancellation is unavailable; cleanup waits for SDK completion.
+  Ctrl+C exits FDCC, waits for standstill, then requests/reads back Disable.
+  J6 thumbstick is ignored in FDCC. Single-arm yaw/gripper options still apply.
 
 Comparison builds define `SMRCORE_PICO_LEGACY_RELEASE_STOP`: release sends 100
 fixed measured-TCP ServoP frames (J6 release: measured-joint JointPassthrough),
@@ -23,7 +73,7 @@ embedded in the core for the corresponding B3 mounting configuration, with no mo
 both controllers to `base` and confirm fresh base-frame state, calculate
 translation and rotation targets in the shared world, then transform each
 complete target back to its arm base before ServoP.
-No independent axis correction, manual yaw correction, GetBasePose substitution
+The B3 chain has no independent axis correction, manual yaw correction, GetBasePose substitution
 or URDF fallback is used. Invalid options, mount matrices and reference switches
 fail closed. Public GetStatus exposes
 latest joint positions, condition numbers and scales via atomics; not a coherent
@@ -91,3 +141,25 @@ first ServoP call boundaries (cached before diagnostic throttling), current call
 boundaries and cached-feedback read/first-observation times. No remote clock
 subtraction or assertion of DDS send/receive acknowledgement. Python v1 reader
 compatibility retained in the diagnostic scripts; old binary package unchanged.
+
+Standalone `single_arm` connects only RobotOptions::Single, consumes physical
+right input even face-to-face, resolves base with `SingleWorldFromBase`,
+and reports values in the right status slots (left slots remain zero).
+Startup ignores left tracking/Grip. Input/right tracking loss, Jacobian expiry,
+guard failure and robot faults use the same freeze/brake/preflight helpers.
+`enable_gripper=false` skips all gripper initialization and target writes in
+both single and dual modes; default dual behavior remains enabled.
+
+`single_mapping_yaw_deg` (default 0, finite [-180,180], single-arm only) rotates
+mapped translation and orientation increments about base +Z. -90 is clockwise
+viewed from +Z toward the origin. The virtual world-from-base uses the inverse
+angle; the measured TCP anchor stays unchanged. No cabinet frame/URDF write.
+
+Pico numeric preflight rejects nonfinite controller pose/buttons/axes, zero or
+overflowing quaternion norms and invalid receive timestamps before mapping or
+gripper processing. Headset values are checked when head-yaw mapping is enabled;
+unused left input is ignored in single-arm mode. Invalid numeric packets terminate
+the session through existing StopMotion/Disable cleanup. Candidate targets are
+checked before IK; all six J6 joint targets and velocity are checked before
+ServoJ, with existing final ServoP finite checks retained. Backend-generated
+nonfinite commands still require CM/HW protection and diagnosis.

@@ -6,10 +6,19 @@
 
 namespace smrcore::peripherals
 {
+enum class PicoControlMode
+{
+    ServoP,
+    Fdcc,
+    CartesianImpedance,
+};
+
 struct PicoTeleopOptions
 {
     uint16_t port = 8765;
     bool enable_motion = false;
+    bool single_arm = false; // Independent Single SDK instance, physical right hand.
+    bool enable_gripper = true;
     bool enable_rotation = true;
     bool head_yaw_clutched = true;
     bool operator_facing_robot = false;
@@ -20,6 +29,21 @@ struct PicoTeleopOptions
     uint16_t gripper_force = 80;
     uint16_t gripper_speed = 100;
     std::string robot_ip;
+    // Rotate single-arm mapped increments in base: degrees, +Z right-hand rule.
+    double single_mapping_yaw_deg = 0.0;
+    PicoControlMode control_mode = PicoControlMode::ServoP;
+    // FDCC balanced input profile. Advanced tuning, not controller kp/kd.
+    double fdcc_max_speed = 0.30; // m/s
+    double fdcc_max_accel = 1.2; // m/s^2
+    double fdcc_follow_gain = 8.0; // 1/s
+    double fdcc_target_scale = 1.0; // Optional measured-to-target extrapolation.
+    double fdcc_target_feedforward = 0.5; // Bounded target velocity feedforward [0,1].
+    // Cartesian impedance K/D: XYZ then RX/RY/RZ, SDK hold baseline.
+    std::array<double, 6> impedance_stiffness{120, 120, 120, 20, 20, 20};
+    std::array<double, 6> impedance_damping{20, 20, 20, 1, 1, 1};
+    double impedance_max_speed = 0.15; // Equilibrium-point shaping, m/s.
+    double impedance_max_accel = 0.6; // m/s^2
+    double impedance_follow_gain = 8.0; // 1/s, not controller stiffness.
 };
 
 struct PicoTeleopStatus

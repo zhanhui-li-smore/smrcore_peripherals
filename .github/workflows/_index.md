@@ -24,3 +24,7 @@
 - Codex API workflow is manual-only; CI excludes automation/release-notes documents-only branch.
 
 - ci.yml: test documentation packaging and publish only curated release text, without generated commit diaries.
+
+- ci.yml: collects all offline Python tests, including single-arm mapping,
+  nonfinite input and FDCC/impedance workers; installs Eigen headers for the
+  C++ fault-injection harnesses without requiring robot hardware.

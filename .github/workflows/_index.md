@@ -18,6 +18,9 @@
 - ci.yml: release notes generated from shared bilingual guides; commit summaries appended by GitHub.
 
 - Full Git history feeds version notes; successful default-branch builds refresh Pages after automatic tags.
+- docs.yml / ci.yml manual job: explicit bilingual version-note generation
+  validates retained fragments before site/manual tooling; website job uploads
+  version-notes Markdown previews. All outputs share version_history.py.
 
 - codex-release-notes.yml: prepare → read-only Codex → fresh-runner validation/artifacts; optional API key, default branch only.
 

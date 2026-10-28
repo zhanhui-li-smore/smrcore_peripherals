@@ -37,16 +37,34 @@ python3 scripts/release_notes.py --tag vX.Y.Z --repository owner/repo --output /
 
 ## 自动版本记录
 
-`version_history.py` 从目标提交可达的正式 `vX.Y.Z` tag 计算累计范围，未打 tag 的提交显示为“未发布”。按变更路径归类并保留提交链接；原始标题作为缺少发布文案时的回退，不推断代码行为。合并提交不重复列出，其包含的普通提交仍收录。版本说明按 Git tag 标记，不代表该 tag 的制品已发布成功；下载状态以 Releases 页为准。
+`version_history.py` 从目标提交可达的正式 `vX.Y.Z` tag 计算累计范围，未打 tag 的提交显示为“未发布”。网站和说明书流水线都有独立的 **Generate bilingual release notes** 步骤；网站工作流还上传 `version-notes` 制品供检查。版本说明按 Git tag 标记，下载状态以 Releases 页为准。
 
-要得到面向用户的双语条目，可以在同一提交消息正文增加：
+新功能和修复随代码提交双语片段到 `changelog.d/YYYY-MM/<name>.<kind>.md`。流水线自动按版本范围收录，不必再登记到 `docs/reviewed-release-notes.json`。例如：
+
+```markdown
+<!-- release-category: pico -->
+
+## 中文
+
+- 增加独立单臂的右手柄遥操。
+
+## English
+
+- Add right-controller teleoperation for a standalone arm.
+```
+
+`kind` 使用 `added`、`changed`、`fixed`、`deprecated`、`removed`、`security`；`misc` 只保留内部记录，不进入用户版本页。分类使用 `spacemouse`、`ft`、`pico`、`master`、`python`、`sdk`、`docs` 或 `other`。非 `misc` 片段缺少语言或分类无效时，生成步骤报错，防止带着遗漏继续部署。
+
+片段保留在仓库中。只汇总相对上一版本新增且在目标提交中仍存在的片段，采用目标提交中的最终内容；已发布的片段不在后续版本重复展示。未发布期间可修改或撤回，正式发布后的勘误应新建片段。每条自动链接到不可变提交中的片段。旧审核摘要优先，同一提交的片段与提交摘要去重。
+
+现有的双语提交摘要仍兼容，可以在同一提交消息正文增加：
 
 ```text
 Release-note-zh: Pico 支持读取左右手柄姿态。
 Release-note-en: Pico can read left and right controller poses.
 ```
 
-网站构建、PDF/HTML 手册、正式 Release 均使用同一个 Git 汇总器。网站在 push 和默认分支构建成功后更新，因此每周自动创建 tag 后也会刷新版本说明；不由 CI 写回源代码。网站生成文件是构建产物。本地运行 MkDocs 时，构建 hook 自动生成版本页；也可单独执行 `python3 scripts/version_history.py`。需要完整 Git 历史与 tag，浅克隆应执行 `git fetch --unshallow --tags`。
+网站构建、PDF/HTML 手册、正式 Release 均使用同一个 Git 汇总器。网站在 push 和默认分支构建成功后更新，因此每周自动创建 tag 后也会刷新版本说明；不由 CI 写回源代码。网站生成文件是构建产物。本地运行 MkDocs 时，构建 hook 自动生成版本页；也可执行 `python3 scripts/version_history.py --target HEAD --output-dir /tmp/version-notes`。生成器读取已提交的 Git 树，提交后再检查预览；需要完整 Git 历史与 tag，浅克隆应执行 `git fetch --unshallow --tags`。
 
 ## Codex 草稿
 
@@ -55,5 +73,5 @@ Release-note-en: Pico can read left and right controller poses.
 ## 用户发布基线
 
 `docs/release-baseline.json` 汇总 v0.1.0 交付能力，网站、说明书和 Release 共用。此前开发日志不再展开；旧 tag 和制品保留在 GitHub。
-基线后的条目仅收录已审核摘要或 `Release-note-zh` / `Release-note-en`，内部维护提交不自动显示。提交功能变更时必须提供两种语言的条目，或在发版前审核归档草稿并写入 `docs/reviewed-release-notes.json`。
+基线后的条目收录双语变更片段、已审核摘要或 `Release-note-zh` / `Release-note-en`，内部维护提交不自动显示。优先随功能变更提交双语片段，已有 Codex 草稿仍可审核后写入 `docs/reviewed-release-notes.json`。
 C++ 包只打包用户文档与示例；本目录、AI 索引和模板源码不进入安装包。

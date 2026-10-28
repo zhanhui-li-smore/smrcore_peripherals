@@ -1,16 +1,15 @@
-Pico 遥操增加独立单臂右手柄入口、base Z 映射角及可选夹爪控制，支持
-ServoP、FDCC 和笛卡尔阻抗模式；双臂仍默认使用原 ServoP 链路。
-配套机器人 SDK 版本为 0.2.0，需显式启用 Pico bridge 构建，并使用支持
-对应控制接口的柜端程序。
+<!-- release-category: pico -->
 
-新增有限值与目标预检、受速度/加速度约束的目标整形和分阶段诊断。
-FDCC/阻抗检查暂慢时冻结最后发送的平衡点，保留控制模式；新检查通过后
-自动续跟。真实输入断流、故障和候选拒绝保留停止处理；松开 Grip 后
-退出柔顺模式持位，再次握紧从实测 TCP 重新对齐。阻抗实机跟随表现仍需
-按具体构型验证，离线测试不代表接触力或实机跟随性能验收。
+## 中文
 
-中英文用法和 AI 索引同步更新；CI 纳入单臂映射、无效输入及柔顺模式
-离线回归，并修复 pytest 的测试包导入。
+- 增加独立单臂 i3 的右手柄遥操入口，支持 base Z 映射角和可选夹爪控制；双臂默认沿用原 ServoP 链路。
+- 单臂可选择 ServoP、FDCC 或笛卡尔阻抗模式。松开 Grip 后退出柔顺模式持位，再次握紧从实测 TCP 重新对齐。
+- 增加无效数值和目标预检、速度与加速度受限的目标整形，以及输入、检查和跟随误差诊断。输入仍新鲜但预检暂慢时，冻结最后发送的平衡点并保留模式；检查通过后自动续跟。输入断流、故障和候选拒绝保留停止处理。
+- Pico 程序已通过官方 C++ SDK 0.2.0 编译验证；需显式启用 Pico bridge 构建并使用支持对应接口的柜端程序，当前预编译 SDK bridge 制品仍提供 SpaceMouse 和六维力接入。阻抗实机跟随效果需按具体构型验证。
 
-来源：`teleop/`、`app/app_peripherals_pico_bridge.cpp`、
-`src/peripherals/pico/teleop.hpp`、`unittests/`、`.github/workflows/ci.yml`。
+## English
+
+- Add right-controller teleoperation for a standalone i3 arm, with base-Z mapping yaw and optional gripper control. Dual-arm operation retains the existing ServoP default.
+- Select ServoP, FDCC or Cartesian impedance for a single arm. Releasing Grip exits compliance mode to hold; re-engaging Grip anchors the target to the measured TCP.
+- Add invalid-value and target checks, velocity- and acceleration-bounded target shaping, and input, validation and tracking diagnostics. When input is fresh but validation is delayed, retain the mode and freeze the last sent equilibrium; tracking resumes after validation succeeds. Input loss, faults and rejected candidates retain stop handling.
+- The Pico application builds against official C++ SDK 0.2.0. Enable the Pico bridge explicitly and use cabinet software supporting the selected interfaces. Current prebuilt SDK bridge assets still provide SpaceMouse and force/torque integration. Hardware impedance tracking requires validation for the target configuration.

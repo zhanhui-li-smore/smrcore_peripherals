@@ -12,6 +12,8 @@ GitHub `smore-robotics/smrcore_peripherals` 是源码真源。
 
 - changelog.d/: monthly retained change fragments; current Pico single-arm
   entry covers ServoP, FDCC/impedance and input/check lifecycle diagnostics.
+  Bilingual fragments feed site/manual/Release version notes automatically;
+  AGENTS.md and docs/maintainers/releasing.md define the submission format.
 - .gitignore: exclude generated dependencies and build output; keep changelog.d/
   available for retained release fragments despite the dependency-file *.d rule.
 - README.md / README.en.md: 中英文仓库入口；按源码仓库语义说明构建、SDK 下载、app、Python 和安全要求

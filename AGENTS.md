@@ -31,3 +31,13 @@ Public source repository for SMRCore peripheral integration. It contains the C++
 - Function and method names use PascalCase.
 - Local variables and parameters use snake_case.
 - High-rate robot integration goes through `robot.Peripheral().UpdateSpaceMouseSample()` and `robot.Peripheral().UpdateFtSensorSample()`.
+
+## Release Notes
+
+- User-facing changes include a retained bilingual fragment in
+  `changelog.d/YYYY-MM/<name>.<kind>.md`; see `docs/maintainers/releasing.md`
+  for category and language headings. Internal `misc` fragments are excluded.
+- Site, manual and Release builds aggregate fragments from immutable Git ranges.
+  After committing, preview with `python3 scripts/version_history.py` before
+  pushing; confirm new entries appear under Unreleased. The generator reads
+  committed files, not worktree edits. Published version notes remain unchanged.

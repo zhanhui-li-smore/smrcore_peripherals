@@ -18,6 +18,7 @@ GROUPS = {
     'docs': ('文档', 'Documentation'),
     'other': ('公共接口与其他更新', 'Common interfaces and other changes'),
 }
+FRAGMENT_KINDS = {'added', 'changed', 'fixed', 'deprecated', 'removed', 'security', 'misc'}
 
 
 def git(*args, root=ROOT):
@@ -97,6 +98,39 @@ def reviewed_entries(tip, base, commits, root=ROOT):
     return entries, covered
 
 
+def fragment_entries(tip, base, reviewed, root=ROOT):
+    """Read new retained fragments from the version's Git tree, not the worktree."""
+    def paths(revision):
+        return set(git('ls-tree', '-r', '--name-only', revision, '--', 'changelog.d', root=root).splitlines())
+    previous = paths(base[1]) if base else set()
+    revision = f'{base[1]}..{tip}' if base else tip
+    entries, covered = [], set()
+    for path in sorted(paths(tip) - previous):
+        match = re.fullmatch(r'changelog\.d/\d{4}-(?:0[1-9]|1[0-2])/[a-z0-9][a-z0-9-]*\.([a-z]+)\.md', path)
+        if not match:
+            continue  # README and AI indices are not release fragments.
+        kind = match.group(1)
+        if kind not in FRAGMENT_KINDS:
+            raise ValueError(f'{path}: unknown release fragment kind: {kind}')
+        evidence = git('rev-list', '--reverse', '--no-merges', revision, '--', path, root=root).splitlines()
+        if evidence and evidence[0] in reviewed:
+            continue  # The approved summary already describes this change.
+        covered.update(evidence)
+        if kind == 'misc':
+            continue
+        text = git('show', f'{tip}:{path}', root=root)
+        parts = re.fullmatch(
+            r'\s*<!-- release-category: ([a-z]+) -->\s*## 中文\s*\n(.+?)\n## English\s*\n(.+?)\s*',
+            text, re.DOTALL)
+        if not parts or not all(parts.group(i).strip() for i in (2, 3)):
+            raise ValueError(f'{path}: expected release-category, ## 中文 and ## English with nonempty notes')
+        key = parts.group(1)
+        if key not in GROUPS:
+            raise ValueError(f'{path}: unknown release category: {key}')
+        entries.append((key, {'zh': parts.group(2).strip(), 'en': parts.group(3).strip()}, path))
+    return entries, covered
+
+
 def section(label, tip, base, language, repository, root=ROOT, user_only=False):
     zh = language == 'zh'
     title = ('未发布' if zh else 'Unreleased') if label == 'Unreleased' else label.removeprefix('v')
@@ -116,6 +150,12 @@ def section(label, tip, base, language, repository, root=ROOT, user_only=False):
         text = entry[language].replace('<', '&lt;').replace('>', '&gt;')
         links = ', '.join(f'[{sha[:7]}](https://github.com/{repository}/commit/{sha})' for sha in entry['commits'])
         grouped[key].append(f'- {text} ({links})')
+    fragments, fragment_commits = fragment_entries(tip, base, covered, root)
+    for key, entry, path in fragments:
+        text = entry[language].replace('<', '&lt;').replace('>', '&gt;')
+        source = '变更记录' if zh else 'Change record'
+        grouped[key].append(f'{text}\n\n[{source}](https://github.com/{repository}/blob/{tip}/{path})\n')
+    covered.update(fragment_commits)
     for commit in commits:
         if commit in covered:
             continue
@@ -166,6 +206,11 @@ def history(language='zh', target='HEAD', repository='zhanhui-li-smore/smrcore_p
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--repository', default='zhanhui-li-smore/smrcore_peripherals')
+    parser.add_argument('--target', default='HEAD')
+    parser.add_argument('--output-dir', type=Path, default=ROOT / 'docs/site')
     args = parser.parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     for lang, filename in [('zh', 'release-notes.zh.md'), ('en', 'release-notes.md')]:
-        (ROOT / 'docs/site' / filename).write_text(history(lang, repository=args.repository))
+        output = args.output_dir / filename
+        output.write_text(history(lang, target=args.target, repository=args.repository))
+        print(f'Generated {output}')

@@ -111,6 +111,8 @@ int main() {
 
 PRELUDE = r'''
 #include <cassert>
+#include <iomanip>
+#include <sstream>
 #include <Eigen/Geometry>
 #include "pico_fdcc.hpp"
 #include "peripherals/pico/teleop.hpp"
@@ -266,6 +268,27 @@ int main() {
         Until([&] { return !guard.Snapshot().error.empty(); });
         assert(robot.ik_calls == 0);
     }
+    // Capture the actual rejected axis and distinguish actual/IK clearance
+    // from a branch crossing, even when measured q is far from the boundary.
+    for (int axis : {2, 4}) {
+        for (int fault = 0; fault < 3; ++fault) {
+            rcore::sdk::Robot robot;
+            robot.clearance_axis = axis;
+            robot.clearance_fault = fault;
+            HandServoState target;
+            PicoTargetGuard guard(robot, Policy::MeasuredSlowdown);
+            guard.Submit(target);
+            Until([&] { return guard.Snapshot().ready; });
+            const auto reason = guard.Snapshot().blocked_reason;
+            const auto start = reason.find("J" + std::to_string(axis + 1) + "{");
+            assert(start != std::string::npos);
+            const auto detail = reason.substr(start, reason.find('}', start) - start);
+            assert(detail.find("actual_near=" + std::to_string(fault == 0)) != std::string::npos);
+            assert(detail.find("ik_near=" + std::to_string(fault == 1)) != std::string::npos);
+            assert(detail.find("cross=" + std::to_string(fault == 2)) != std::string::npos);
+            assert(reason.find("target_xyz_m=") != std::string::npos);
+        }
+    }
     // Measured slowdown still eases toward a singularity and permits retreat.
     assert(ConditionNumberToSpeedScale(15, true) == 1);
     assert(ConditionNumberToSpeedScale(45, true) == .25);
@@ -300,15 +323,19 @@ class PicoFdccBalanceTest(unittest.TestCase):
         sdk = (IMPEDANCE_SDK if impedance else FAKE_SDK).replace(
             'namespace sdk {', 'namespace sdk {\nusing JointPositions = std::array<double,6>;')
         sdk = sdk.replace('double timestamp=1;', 'std::array<double,6> positions{.4,.4,.4,.4,.4,.4}; double timestamp=1;')
+        sdk = sdk.replace('RobotState s;', 'RobotState s; if (clearance_fault == 0) { s.positions[clearance_axis] = .05; }')
         sdk = sdk.replace('Robot& Control()', r'''
  std::atomic<int> fk_calls{0}, ik_calls{0}, ik_delay_ms{0};
  bool ik_failure=false, fk_failure=false, fk_mismatch=false, bad_joint=false, bad_clearance=false;
+ int clearance_axis=2, clearance_fault=-1;
  Result InverseKinematics(Pose p, JointPositions& q) {
   ++ik_calls;
   std::this_thread::sleep_for(std::chrono::milliseconds(ik_delay_ms.load()));
   q={p.t[0],p.t[1],p.t[2]/.01,p.r[0],p.r[1],p.r[2]};
   if (bad_joint) {q[0]=NAN;}
   if (bad_clearance) {q[2]=0;}
+  if (clearance_fault == 1) {q[clearance_axis]=.05;}
+  if (clearance_fault == 2) {q[clearance_axis]=-.4;}
   return {!ik_failure};
  }
  Result ForwardKinematics(JointPositions q, Pose& p) {

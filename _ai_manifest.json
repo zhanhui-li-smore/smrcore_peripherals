@@ -1,5 +1,6 @@
 {
   "unittests/__init__.py": "unittests/_index.md",
+  "unittests/test_pico_dual_fdcc.py": "unittests/_index.md",
   "unittests/test_pico_base_yaw.py": "unittests/_index.md",
   "unittests/test_pico_nonfinite.py": "unittests/_index.md",
   "unittests/test_pico_legacy_release.py": "unittests/_index.md",
@@ -173,5 +174,6 @@
   "teleop/pico_compliance.hpp": "teleop/pico_compliance.md",
   "teleop/pico_impedance.hpp": "teleop/pico_compliance.md",
   "unittests/test_pico_impedance.py": "unittests/_index.md",
-  "unittests/test_pico_fdcc_balance.py": "unittests/_index.md"
+  "unittests/test_pico_fdcc_balance.py": "unittests/_index.md",
+  "docs/pico_teleop_quickstart.md": "docs/_index.md"
 }

@@ -40,7 +40,8 @@ struct CartesianImpedanceParams {
  double position_error_saturation=.03, orientation_error_saturation=.25;
 };
 struct Robot {
- std::atomic<int> mode{0},enabled{0},sent{0},exited{0},disabled{0},stops{0},manual{0};
+ std::atomic<int> mode{0},enabled{0},sent{0},exited{0},disabled{0},stops{0},manual{0},estops{0};
+ std::atomic<bool> motor_enabled{true};
  std::atomic<int> reported_mode{-1},enable_delay_ms{0},exit_delay_ms{0},send_delay_ms{0};
  std::atomic<bool> connected{true},fault{false},freeze_stamp{false},bad_tcp{false},owned{true};
  std::atomic<bool> fail_enable{false},fail_send{false},fail_exit{false},fail_manual{false};
@@ -77,7 +78,8 @@ struct Robot {
   ++exited; std::this_thread::sleep_for(std::chrono::milliseconds(exit_delay_ms.load()));
   if(!fail_exit){mode=0;} return {!fail_exit};
  }
- Result Disable(){++disabled;return {};}
+ Result Disable(){++disabled;if(mode==5){return {false};}motor_enabled=false;return {};}
+ Result EStop(){++estops;mode=0;motor_enabled=false;return {};}
  void StopMotion(){++stops;}
  // No FDCC APIs, ServoP, ServoJ, gains/force-source persistence or safety setters.
 };
@@ -146,7 +148,7 @@ int main(){
   PicoImpedance w(r,k,d);Submit(w);
   if(failure==3){Until([&]{return r.sent>0;});r.fail_exit=true;w.Pause();}
   Until([&]{return !w.Snapshot().error.empty();});w.Stop();assert(r.exited>0);
-  if(failure==3){assert(r.disabled>0 && r.stops>0);}else{assert(r.mode==0);}
+  if(failure==3){assert(r.estops==1 && !r.motor_enabled && r.mode==0);}else{assert(r.mode==0);}
  }
  // Mode loss, disconnection, latched fault, nonfinite and frozen feedback end session.
  for(int failure:{0,1,2,3,4}){
@@ -242,7 +244,11 @@ int main(){
  assert(o.control_mode==smrcore::peripherals::PicoControlMode::ServoP);
  assert(o.fdcc_max_speed==.30 && o.fdcc_max_accel==1.2 && o.fdcc_follow_gain==8);
  assert(o.fdcc_target_feedforward==.5 && o.fdcc_target_scale==1);
+ assert(o.fdcc_damping_factor==.9);
+ assert(o.fdcc_error_scale==1.);
  assert(o.impedance_max_speed==.15 && o.impedance_max_accel==.6);
+ assert(o.impedance_stiffness[0]==400 && o.impedance_stiffness[5]==30);
+ assert(o.impedance_damping[0]==30 && o.impedance_damping[5]==2);
  assert(parse({"--single-arm","--robot-ip","192.0.2.1","--control-mode","fdcc",
   "--single-mapping-yaw","-90","--motion-scale","1","--enable-motion","--no-gripper"}));
  assert(o.fdcc_max_speed==.30 && o.fdcc_max_accel==1.2 && o.fdcc_follow_gain==8);
@@ -277,8 +283,42 @@ int main(){
  assert(o.fdcc_target_feedforward==.5);
  assert(parse({"--control-mode","fdcc","--fdcc-target-feedforward","0"}));
  assert(o.fdcc_target_feedforward==0);
+ assert(parse({"--fdcc-damping-factor","0.7"}));
+ assert(o.fdcc_damping_factor==.7);
+ for(const char* bad:{"-0.1","1.1","nan","inf","0.7x"}){
+  assert(!parse({"--fdcc-damping-factor",bad}));
+ }
+ assert(!parse({"--fdcc-damping-factor"}));
+ assert(parse({"--fdcc-error-scale","2"}));
+ assert(o.fdcc_error_scale==2);
+ for(const char* bad:{"0","-0.1","4.1","nan","inf","2x"}){
+  assert(!parse({"--fdcc-error-scale",bad}));
+ }
+ assert(!parse({"--fdcc-error-scale"}));
  assert(!parse({"--fdcc-target-feedforward","nan"}));
  assert(!parse({"--fdcc-target-feedforward"}));
+ // Named profiles select only K/D; per-field overrides win in either order.
+ for(bool profile_first:{false,true}) {
+  o=Options{};
+  assert(parse({"--single-arm","--control-mode","impedance"}));
+  if(profile_first) {
+   assert(parse({"--impedance-profile","hold","--impedance-stiffness","100,110,120,10,11,12"}));
+  } else {
+   assert(parse({"--impedance-stiffness","100,110,120,10,11,12","--impedance-profile","hold"}));
+  }
+  assert(o.impedance_stiffness[0]==100 && o.impedance_damping[0]==20 && o.impedance_damping[5]==1);
+  assert(o.impedance_max_speed==.15 && o.impedance_max_accel==.6);
+  assert(parse({"--impedance-profile","spacemouse"}));
+  assert(o.impedance_stiffness[0]==400 && o.impedance_damping[5]==2);
+ }
+ o=Options{};
+ assert(parse({"--control-mode","impedance","--impedance-profile","hold"}));
+ assert(!o.single_arm && o.impedance_stiffness[0]==120);
+ o=Options{};
+ assert(!parse({"--impedance-profile","hold"}));
+ assert(!parse({"--single-arm","--control-mode","fdcc","--impedance-profile","spacemouse"}));
+ assert(!parse({"--single-arm","--control-mode","impedance","--impedance-profile","bad"}));
+ assert(!parse({"--impedance-profile"}));
 }
 ''')
         with tempfile.TemporaryDirectory() as directory:

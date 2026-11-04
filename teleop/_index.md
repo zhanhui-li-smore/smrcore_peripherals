@@ -4,10 +4,38 @@
 > SRC: pico_fdcc.hpp, fdcc_target_limiter.hpp
 > REF: pico_compliance.md
 
+- FDCC `fdcc_direct_target` bypasses host XYZ/rotation shaping after the measured activation seed. Approved targets remain subject to existing checks, expiry hold, input deadlines and release-required pauses; no extrapolation allowed. Default remains shaped.
+
 # PICO teleoperation core
 
-- Single-arm `CartesianImpedance` shares the compliance worker/clutch/guard
-  lifecycle; mode 5, Manual equilibrium targets through the SDK DDS API at
+- `fdcc_error_scale` sets the native FDCC PD-output multiplier (default 1.0,
+  local test range [0.1,4]), including pose and external-force terms. Both arms
+  receive it on activation and startup prints the requested value. It does not
+  change the native stiffness constants; higher gain may destabilize contact.
+
+- FDCC passes configurable `fdcc_damping_factor` to both independent workers;
+  finite [0,1], default 0.9. Lower is stronger per-substep virtual velocity decay,
+  not task-space damping or a guaranteed closed-chain stability profile.
+  Invalid values and non-FDCC overrides reject before any connection.
+- A failed compliance exit/mode acknowledgement requests EStop then Disable;
+  this fault path never automatically recovers or re-enables a robot.
+
+- Rejected elbow/wrist candidates retain J3/J5 measured and IK angles (degrees),
+  actual/IK 10-degree exclusion flags, boundary-crossing flags, input sequence,
+  feedback timestamp and rejected target pose in the pause reason. Diagnostic
+  detail only; clearance predicate, latch and motion behavior are unchanged.
+
+- Dual compliance prints input health at pause-latch transitions and once per
+  second: WebSocket connection, arm-mapped present/tracked flags, input age,
+  loop gap and window maxima of loop/observed receive/headset gaps and sequence
+  step. Latest-slot consumption may skip frames; sequence steps are not network
+  loss counts. Headset and host clocks are compared only within each clock.
+  Health is observed by the main loop, so a worker pause can precede that snapshot.
+  The 400ms input timeout and release-required recovery remain unchanged.
+
+- Single/dual-arm `CartesianImpedance` shares the compliance worker/clutch/guard
+  lifecycle; default K/D matches SDK SpaceMouse (K=400/30, D=30/2).
+  Startup prints resolved K/D and shaper limits; mode 5, Manual targets via DDS at
   up to 200Hz. Configurable six-axis K/D and translation shaping, no virtual
   extrapolation. Shares measured-Jacobian slowdown with FDCC; reachable
   high-condition candidate endpoints no longer latch a pause, avoiding six
@@ -15,7 +43,7 @@
   Release waits for backend damping exit to mode 0; faults,
   ownership loss and stale feedback end the session. Details: pico_compliance.md.
 
-- Single-arm `control_mode=Fdcc` uses `PicoFdcc`: latest approved target only,
+- Single/dual-arm `control_mode=Fdcc` uses `PicoFdcc`: latest approved target only,
   a dedicated non-RT RPC worker (50 Hz maximum), generation cancellation on
   release, mode-6 acknowledgement before pose writes, and mode-0 acknowledgement
   before reclutch. No ServoP/ServoJ fallback or persistent force-source write.
@@ -47,12 +75,30 @@
   IK/FK/queue timing and check=WAIT expose delayed validation. A shared rearm
   latch after a real pause rejects late approvals until fresh released Grip and mode-0 confirmation;
   the main loop clears its mapping anchor before accepting the next press.
-  Input pauses distinguish WebSocket disconnect, tracking loss and >250ms
+  Input pauses distinguish WebSocket disconnect, tracking loss and >400ms
   sample age; log sequence/age/loop gap and worker deadline overrun separately.
   mode loss, stale robot feedback, RPC failure or target RPC >200ms exits.
   In-flight RPC cancellation is unavailable; cleanup waits for SDK completion.
   Ctrl+C exits FDCC, waits for standstill, then requests/reads back Disable.
   J6 thumbstick is ignored in FDCC. Single-arm yaw/gripper options still apply.
+
+- Dual FDCC/impedance uses `DualPicoCompliance` and `TickDualComplianceArm`: separate workers, guards,
+  clutches and target slots for each arm with the existing B3/operator mapping.
+  Factory selects PicoFdcc (mode 6) or PicoImpedance (mode 5); impedance bypasses
+  FDCC force-source queries and virtual extrapolation, uses 200Hz DDS and
+  checks per-arm SDK ownership. Both impedance arms share K/D/shaping settings.
+  Both arms must start in mode 0; FDCC force sources are read without modification.
+  A single-arm tracking/Jacobian/target rejection pause requires release/regrip
+  on that arm; shared input loss pauses both. Any worker/robot fault ends both.
+  Pair teardown cancels both streams before joining either worker, including
+  exception unwind. Normal exit returns to mode 0, waits for standstill and
+  attempts Disable/readback on each arm without ServoP/ServoJ fallback.
+  Tests: `../unittests/test_pico_dual_fdcc.py` (production orchestration/workers,
+  injected SDK feedback/RPC; no hardware or physical contact validation).
+  Dual startup logs SDK initialization, command-source acquisition, reference
+  setup and enable separately. Cancellation after a blocking startup call is
+  checked before proceeding to source acquisition/reference setup/enable;
+  actual RPC timeout behavior still depends on the linked SDK.
 
 Comparison builds define `SMRCORE_PICO_LEGACY_RELEASE_STOP`: release sends 100
 fixed measured-TCP ServoP frames (J6 release: measured-joint JointPassthrough),
@@ -82,7 +128,7 @@ shutdown. Header: `src/peripherals/pico/teleop.hpp`.
 
 > FLOW: WebXR delta → head-yaw/operator mapping → world target → inverse(world_from_base) → base ServoP
 
-Grip release invalidates the guard generation and clears checked/pending
+In default ServoP, Grip release invalidates the guard generation and clears checked/pending
 candidates. Late candidate results cannot relatch the canceled generation; release uses a separate planned ServoJ stop
 worker, and stop failure terminates the session;
 actual Jacobian condition uses a quadratic scale from 1 at 30 to 0 at 60 while
@@ -95,7 +141,7 @@ without latching. Candidate checks pending beyond 200 ms also hold the last
 approved target and resume when a result arrives; they do not terminate the
 session. A transient Jacobian sample older than 250 ms freezes and briefly
 brakes only the affected arm, then re-clutches from measured TCP after recovery.
-PICO input older than 250 ms freezes and brakes both arms, cancels pending
+PICO input older than 400 ms freezes and brakes both arms, cancels pending
 gripper targets, and likewise resumes from measured TCP when WebXR recovers.
 Stale robot state, guard infrastructure failures and controller faults remain
 fail-closed.

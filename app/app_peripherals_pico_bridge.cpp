@@ -23,8 +23,9 @@ void PrintUsage(const char *program)
                  " [--gripper-force 80] [--gripper-speed 100]"
                  " [--robot-ip ADDRESS]\n"
               << "--enable-motion 是必需的运动确认；默认 SDK ServoP。\n"
-                 "--control-mode fdcc：单臂 FDCC；松开 Grip 退出力控持位，重新握紧继续；禁用摇杆 J6。\n"
-                 "--control-mode impedance：单臂笛卡尔阻抗，CST 力矩控制，200Hz 平衡点更新；松手退出阻抗持位。\n"
+                 "--control-mode fdcc：双臂或独立单臂 FDCC；各臂松开 Grip 退出力控持位，重新握紧继续；禁用摇杆 J6。\n"
+                 "--control-mode impedance：双臂或独立单臂笛卡尔阻抗，CST 力矩控制，200Hz 平衡点更新；松手退出阻抗持位。\n"
+                 "--impedance-profile spacemouse|hold：默认 SpaceMouse 遥操 K/D；hold 使用原柔软保持参数。\n"
               << "--single-arm：独立单臂，只用物理右手柄，base 坐标系；\n"
                  "--single-mapping-yaw：单臂映射绕 base Z 轴偏转，单位度；从 +Z 看向原点，-90 为顺时针 90 度。\n"
                  "--no-gripper：跳过 DH 夹爪初始化与 Trigger 控制。\n"
@@ -37,13 +38,19 @@ void PrintAdvancedUsage(const char *program)
     PrintUsage(program);
     const Options defaults;
     std::cout << "\n工程调试参数（旧命令继续兼容）：\n"
+              << "--fdcc-direct-target：直接发送通过校验的目标；绕过主机平移/转动平滑、目标限速/限加速度和速度前馈；要求 target-scale=1，仅 FDCC。\n"
               << "--fdcc-max-speed：平移目标速度 [0.01,0.5] m/s，默认 " << defaults.fdcc_max_speed << "。\n"
               << "--fdcc-max-accel：平移目标加速度 [0.05,2] m/s2，默认 " << defaults.fdcc_max_accel << "。\n"
               << "--fdcc-follow-gain：入口平移跟随增益 [1,40] /s，默认 " << defaults.fdcc_follow_gain << "，不是控制器 kp/kd。\n"
               << "--fdcc-target-feedforward：目标速度前馈比例 [0,1]，默认 " << defaults.fdcc_target_feedforward << "；0 使用原平滑器。\n"
               << "--fdcc-target-scale：虚拟目标倍数 [1,3]，默认 " << defaults.fdcc_target_scale << " 关闭；额外前推最多 30mm。\n"
-                 "--impedance-stiffness：六轴 K，默认 120,120,120,20,20,20；XYZ [0,2000] N/m、转动 [0,150] N·m/rad。\n"
-                 "--impedance-damping：六轴 D，默认 20,20,20,1,1,1；XYZ [0,200] N·s/m、转动 [0,60] N·m·s/rad。\n"
+              << "--fdcc-damping-factor：FDCC 每积分子步的虚拟速度保留比例 [0,1]，默认 " << defaults.fdcc_damping_factor
+              << "；减小表示衰减更强，0 会清零虚拟速度；不是任务空间阻尼。\n"
+              << "--fdcc-error-scale：FDCC 内部位姿/外力 PD 输出倍率，测试入口 [0.1,4]，默认 "
+              << defaults.fdcc_error_scale << "；增大可能提高响应，也会放大外力反馈并降低稳定裕度。\n"
+                 "--impedance-stiffness：六轴 K，默认 400,400,400,30,30,30；XYZ [0,2000] N/m、转动 [0,150] N·m/rad。\n"
+                 "--impedance-damping：六轴 D，默认 30,30,30,2,2,2；XYZ [0,200] N·s/m、转动 [0,60] N·m·s/rad。\n"
+                 "显式 K/D 分别覆盖所选 profile，不受参数顺序影响。\n"
                  "--impedance-max-speed / --impedance-max-accel / --impedance-follow-gain：默认 0.15 / 0.6 / 8，范围与 FDCC 同名参数相同。\n";
 }
 
@@ -180,6 +187,8 @@ bool ParseSixNumbers(const std::string &text, std::array<double, 6> &values)
 
 bool ParseOptions(int argc, char **argv, Options &options)
 {
+    std::string impedance_profile;
+    bool explicit_stiffness = false, explicit_damping = false;
     for (int i = 1; i < argc; ++i)
     {
         const std::string argument = argv[i];
@@ -237,12 +246,48 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 return false;
             }
         }
+        else if (argument == "--fdcc-direct-target")
+        {
+            options.fdcc_direct_target = true;
+        }
+        else if (argument == "--fdcc-error-scale" && i + 1 < argc)
+        {
+            if (!ParseFiniteNumber(argv[++i], options.fdcc_error_scale) ||
+                options.fdcc_error_scale < 0.1 || options.fdcc_error_scale > 4.0)
+            {
+                return false;
+            }
+        }
+        else if (argument == "--fdcc-damping-factor" && i + 1 < argc)
+        {
+            if (!ParseFiniteNumber(argv[++i], options.fdcc_damping_factor) ||
+                options.fdcc_damping_factor < 0.0 || options.fdcc_damping_factor > 1.0)
+            {
+                return false;
+            }
+        }
+        else if (argument == "--impedance-profile" && i + 1 < argc)
+        {
+            impedance_profile = argv[++i];
+            if (impedance_profile != "spacemouse" && impedance_profile != "hold")
+            {
+                return false;
+            }
+        }
         else if ((argument == "--impedance-stiffness" || argument == "--impedance-damping") && i + 1 < argc)
         {
             auto &values = argument == "--impedance-stiffness" ? options.impedance_stiffness : options.impedance_damping;
             if (!ParseSixNumbers(argv[++i], values))
             {
                 return false;
+            }
+            if (argument == "--impedance-stiffness")
+            {
+                explicit_stiffness = true;
+            }
+            else
+            {
+                explicit_damping = true;
             }
         }
         else if ((argument == "--impedance-max-speed" || argument == "--impedance-max-accel" ||
@@ -338,6 +383,25 @@ bool ParseOptions(int argc, char **argv, Options &options)
         else
         {
             return false;
+        }
+    }
+    if (!impedance_profile.empty())
+    {
+        if (options.control_mode !=
+            smrcore::peripherals::PicoControlMode::CartesianImpedance)
+        {
+            return false;
+        }
+        const Options defaults;
+        if (!explicit_stiffness)
+        {
+            options.impedance_stiffness = impedance_profile == "hold" ?
+                std::array<double, 6>{120, 120, 120, 20, 20, 20} : defaults.impedance_stiffness;
+        }
+        if (!explicit_damping)
+        {
+            options.impedance_damping = impedance_profile == "hold" ?
+                std::array<double, 6>{20, 20, 20, 1, 1, 1} : defaults.impedance_damping;
         }
     }
     return true;

@@ -45,3 +45,5 @@
   shaping flags, CST damping exit, DDS send diagnostics and motion-test scope.
   Impedance shares FDCC measured-Jacobian slowdown, omits the endpoint-condition
   veto and six FK calls; finite/IK/clearance/FK validation and expiry remain.
+
+- pico.md / pico.zh.md: dual-arm FDCC/Cartesian impedance modes, per-arm guards and 400 ms input timeout.

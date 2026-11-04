@@ -38,12 +38,18 @@ struct PicoTeleopOptions
     double fdcc_follow_gain = 8.0; // 1/s
     double fdcc_target_scale = 1.0; // Optional measured-to-target extrapolation.
     double fdcc_target_feedforward = 0.5; // Bounded target velocity feedforward [0,1].
-    // Cartesian impedance K/D: XYZ then RX/RY/RZ, SDK hold baseline.
-    std::array<double, 6> impedance_stiffness{120, 120, 120, 20, 20, 20};
-    std::array<double, 6> impedance_damping{20, 20, 20, 1, 1, 1};
+    // Cartesian impedance K/D: XYZ then RX/RY/RZ, SDK SpaceMouse teleop profile.
+    std::array<double, 6> impedance_stiffness{400, 400, 400, 30, 30, 30};
+    std::array<double, 6> impedance_damping{30, 30, 30, 2, 2, 2};
     double impedance_max_speed = 0.15; // Equilibrium-point shaping, m/s.
     double impedance_max_accel = 0.6; // m/s^2
     double impedance_follow_gain = 8.0; // 1/s, not controller stiffness.
+    // FDCC controller velocity retention per virtual integration substep [0,1].
+    double fdcc_damping_factor = 0.9;
+    // Engineering test range [0.1,4]; scales FDCC pose and wrench PD together.
+    double fdcc_error_scale = 1.0;
+    // Bypass host shaping only; approved targets and lifecycle guards remain.
+    bool fdcc_direct_target = false;
 };
 
 struct PicoTeleopStatus

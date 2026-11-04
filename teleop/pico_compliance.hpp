@@ -52,9 +52,10 @@ public:
 
     PicoCompliance(rcore::sdk::Robot &robot, Operations operations,
                    double max_speed, double max_accel, double follow_gain,
-                   double target_feedforward = 0.0)
+                   double target_feedforward = 0.0, bool direct_target = false)
         : robot_(robot), operations_(std::move(operations)),
-          limiter_(max_speed, max_accel, follow_gain, target_feedforward), worker_([this] { Run(); }) {}
+          limiter_(max_speed, max_accel, follow_gain, target_feedforward),
+          direct_target_(direct_target), worker_([this] { Run(); }) {}
     virtual ~PicoCompliance() { Stop(); }
     PicoCompliance(const PicoCompliance &) = delete;
     PicoCompliance &operator=(const PicoCompliance &) = delete;
@@ -274,13 +275,51 @@ private:
         }
         throw Error("mode feedback timeout");
     }
+    void EmergencyStopAfterExitFailure()
+    {
+        // A failed CST exit is not a normal motion stop. Ordinary Disable may
+        // be rejected while CST remains active, so explicitly request EStop.
+        try
+        {
+            Check(robot_.EStop(), "EStop after compliance exit failure");
+            mode_owned_ = false;
+        }
+        catch (const std::exception &error)
+        {
+            Fail(error.what());
+        }
+        catch (...)
+        {
+            Fail("emergency stop after compliance exit failure raised an exception");
+        }
+        try
+        {
+            Check(robot_.Disable(), "Disable after compliance exit failure");
+        }
+        catch (const std::exception &error)
+        {
+            Fail(error.what());
+        }
+        catch (...)
+        {
+            Fail("Disable after compliance exit failure raised an exception");
+        }
+    }
     void ExitMode()
     {
         if (mode_owned_)
         {
-            operations_.disable();
-            WaitMode(0, 0, false);
-            mode_owned_ = false;
+            try
+            {
+                operations_.disable();
+                WaitMode(0, 0, false);
+                mode_owned_ = false;
+            }
+            catch (...)
+            {
+                EmergencyStopAfterExitFailure();
+                throw;
+            }
         }
         limiter_.Reset();
         last_sent_ = {};
@@ -395,6 +434,13 @@ private:
                     next_limiter.Reset();
                     (void)next_limiter.Update(sent, sent, 0.0);
                 }
+                else if (direct_target_)
+                {
+                    // Only fresh approved targets reach this branch. Preserve
+                    // generation, expiry, mode and feedback checks around send.
+                    // Seed each activation at measured TCP before direct updates.
+                    sent = last_sent_ == Clock::time_point{} ? measured : target;
+                }
                 else
                 {
                     sent = next_limiter.Update(target, measured, dt, target_stamp);
@@ -410,6 +456,11 @@ private:
                 {
                     continue;
                 }
+                const double direct_speed = last_pose_ && dt > 0.0 ?
+                    (sent.translation() - last_pose_->translation()).norm() / dt : 0.0;
+                const double direct_angular_speed = last_pose_ && dt > 0.0 ?
+                    Eigen::Quaterniond(sent.linear()).angularDistance(
+                        Eigen::Quaterniond(last_pose_->linear())) / dt : 0.0;
                 const auto started = Clock::now();
                 operations_.send(pose);
                 limiter_ = next_limiter;
@@ -429,8 +480,8 @@ private:
                         target.linear()).angularDistance(Eigen::Quaterniond(sent.linear()));
                     status_.follow_error_deg = radians_to_degrees * Eigen::Quaterniond(
                         sent.linear()).angularDistance(Eigen::Quaterniond(measured.linear()));
-                    status_.target_speed_mps = limiter_.Velocity().norm();
-                    status_.target_angular_speed_rps = limiter_.AngularVelocity().norm();
+                    status_.target_speed_mps = direct_target_ ? direct_speed : limiter_.Velocity().norm();
+                    status_.target_angular_speed_rps = direct_target_ ? direct_angular_speed : limiter_.AngularVelocity().norm();
                     status_.guard_age_ms = 200.0 + std::chrono::duration<double, std::milli>(started - valid_until).count();
                     status_.waiting_for_check = waiting_for_check;
                     if (wanted_ && generation_ == generation)
@@ -459,14 +510,10 @@ private:
         catch (const std::exception &error)
         {
             Fail(error.what());
-            try { robot_.Motion().StopMotion(); } catch (...) {}
-            try { robot_.Disable(); } catch (...) {}
         }
         catch (...)
         {
             Fail("cleanup unknown exception");
-            try { robot_.Motion().StopMotion(); } catch (...) {}
-            try { robot_.Disable(); } catch (...) {}
         }
         std::lock_guard<std::mutex> lock(mutex_);
         if (status_.error.empty())
@@ -491,6 +538,7 @@ private:
     Clock::time_point last_feedback_{}, last_sent_{};
     std::optional<Eigen::Isometry3d> last_pose_;
     FdccTargetLimiter limiter_;
+    const bool direct_target_;
     std::thread worker_;
 };
 } // namespace smrcore::peripherals::detail

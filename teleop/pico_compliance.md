@@ -2,9 +2,11 @@
 > REF: fdcc_target_limiter.hpp
 > REF: ../src/peripherals/pico/teleop.md
 
+- FDCC 可选 direct_target：首帧仍锚定实测 TCP，之后直接发送最新批准位姿，绕过主机平移/转动整形、限速/限加速度及前馈。批准过期保持最后目标、断流/拒绝暂停和退出保护保留；诊断速度改为相邻下发位姿差分。
+
 # 简介
 
-Pico 单臂柔顺模式的非 RT worker；最新目标槽，无轨迹积压。
+Pico 单/双臂柔顺模式的非 RT worker；最新目标槽，无轨迹积压。
 
 # 关键成员
 
@@ -18,9 +20,13 @@ Pico 单臂柔顺模式的非 RT worker；最新目标槽，无轨迹积压。
   新结果自动恢复。没有独立输入期限的直接调用仍按批准期限停止。
   真正断流/候选拒绝后 rearm_required 阻止迟到批准重启；
   新鲜松 Grip 且 mode=0 确认后才能清除。
-  陈旧反馈、模式丢失、写入异常仍结束会话；退出失败尝试 StopMotion/Disable。
+  陈旧反馈、模式丢失、写入异常仍结束会话。
+  力控退出 RPC 或 mode=0 确认失败时，立即尝试 EStop 后 Disable；
+  急停请求成功不替代调用方最终状态回读，不自动清错或重新进入力控。
   SDK 已开始的调用不能取消，停止会等待返回。
 - PicoFdcc: mode 6，50Hz RPC，Manual、零 wrench、SDK 默认参数。
+  可覆盖 SDK damping_factor（默认 0.9，有限 [0,1]）和 error_scale
+  （默认 1.0，本地测试入口有限 [0.1,4]）；其余控制参数保持 SDK 默认。
   入口默认 0.30m/s、1.2m/s²、gain 8/s、半量速度前馈；0 恢复原平滑器。
 - PicoImpedance: mode 5，200Hz 上限，Manual、零前馈 wrench；
   仅调用 SetCartesianImpedanceTarget，检查 SDK command_source。

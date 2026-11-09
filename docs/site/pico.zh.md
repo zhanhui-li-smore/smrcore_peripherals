@@ -57,6 +57,7 @@ SDK 需要 `sdk/dual_arm_robot.hpp` 及匹配动态库。发布使用的 SDK 0.2
 ```
 
 先停止只读程序，避免端口冲突，再启动 bridge 并连接头显。
+以下为默认 ServoP 操作；双臂 FDCC 见下方专节。
 
 | 输入 | 行为 |
 | --- | --- |
@@ -78,7 +79,7 @@ SDK 需要 `sdk/dual_arm_robot.hpp` 及匹配动态库。发布使用的 SDK 0.2
 | `--translation-only` | 默认关闭 | 仅平移，不映射旋转 |
 | `--room-fixed` | 默认关闭 | 使用房间固定方向，替代头部 yaw 离合方向 |
 | `--operator-frame` | same-side / face-to-face；默认 same-side | 操作者朝向映射 |
-| `--control-mode` | servop；可选 fdcc / impedance（仅单臂） | 遥操控制模式 |
+| `--control-mode` | servop；fdcc 支持单/双臂，impedance 仅单臂 | 遥操控制模式 |
 | `--single-mapping-yaw` | 0°；−180°～180°；仅单臂 | 映射增量绕 base Z 偏转；从 +Z 看向原点，−90° 为顺时针 |
 | `--translation-scale` | 0.8；0.1–3.0 | 平移映射比例 |
 | `--rotation-scale` | 1.0；0.1–3.0 | 旋转映射比例 |
@@ -91,7 +92,9 @@ SDK 需要 `sdk/dual_arm_robot.hpp` 及匹配动态库。发布使用的 SDK 0.2
 
 ## 5. 暂停、恢复及限制
 
-接近奇异区时，条件数 30–60 使用二次减速；离开时使用加倍门槛。短暂 Jacobian 超时会冻结并制动受影响的单臂；Pico 输入超过 250 ms 未更新时会冻结并制动双臂，同时取消未发送夹爪目标，输入恢复后从实测 TCP 重新离合。机器人状态过期、控制器故障和检查基础设施故障仍会停止会话。
+本节描述默认 ServoP；FDCC 的松手退出和断流后重新握紧规则见下方。
+
+接近奇异区时，条件数 30–60 使用二次减速；离开时使用加倍门槛。短暂 Jacobian 超时会冻结并制动受影响的单臂；Pico 输入超过 400 ms 未更新时会冻结并制动双臂，同时取消未发送夹爪目标，输入恢复后从实测 TCP 重新离合。机器人状态过期、控制器故障和检查基础设施故障仍会停止会话。
 
 候选目标检查尚未完成或不通过时保持最后获批目标，不能理解为强行越过限位。J6 不使用笛卡尔奇异点减速比例，但仍受关节控制约束。
 
@@ -122,6 +125,75 @@ python3 python/app/app_peripherals_pico_bridge.py \
 Python 进程直接替换为 C++ bridge，Ctrl+C 和退出码沿用原程序，不额外留下后台遥操进程。
 不要同时运行 Pico 只读程序占用同一端口。Pico 网络连接步骤见 Pico 指南。
 
+## 双臂 FDCC 遥操
+
+在原双臂命令中加 `--control-mode fdcc`，不加 `--single-arm`：
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --robot-ip <双臂控制柜IP> --enable-motion --control-mode fdcc
+```
+
+启动前两臂须处于运动学持位模式（`mode=0`），双手柄有追踪且 Grip 松开。
+未装 DH 夹爪时加 `--no-gripper`；默认仍会初始化并打开两侧夹爪。
+Python 启动入口可原样传入上述参数。默认控制模式仍为 ServoP。
+
+- 左右 Grip 分别进入对应臂 FDCC；每次进入均从该臂实测 TCP 起步。
+  松开一侧只退出该臂力控并持位，另一侧可以继续跟随。
+- 沿用 B3 支架、头显 yaw 和操作者朝向映射；`face-to-face` 仍交换左右手对应臂。
+  Trigger 控制对应夹爪，FDCC 下摇杆 J6 不生效。
+- 两臂各用独立发送线程，每臂最高 **50 Hz** 更新平衡点；一侧 RPC 变慢不会
+  串行阻塞另一侧发送。不是 1000 Hz ServoP。两臂使用相同的 FDCC 调参选项，
+  各自保留柜端力源配置；零目标力不代表实际接触力为零。
+- 单侧跟踪丢失、Jacobian 过期或目标被拒绝时，仅该臂退出并要求松开再握紧。
+  PICO 断流使两臂退出，两侧均需松开再握紧。检查暂时变慢则冻结最后平衡点，
+  新检查通过后继续跟随。
+- 任一臂发生控制器故障、反馈过期、模式丢失或 RPC 失败，结束双臂会话。
+  Ctrl+C 先取消两臂目标、退出力控，再等待停稳并分别请求下使能。
+
+默认目标限速为平移 0.30 m/s、加速度 1.2 m/s²；详细参数见
+[FDCC 工程调试说明](#单臂-fdcc-遥操)。日志中的 `L FDCC` / `R FDCC` 分别显示
+两臂状态、发送次数、RPC 耗时、跟随误差和重新握紧要求。
+
+兼容性排查：后端支持 FDCC 不等于任意 SDK 都能读取其配置。对
+`0.2.1-alpha.20261016` 后端，SDK `0.2.0` 已复现“状态和力源可读，
+`GetControllerConfig()` 一直等待”；该后端增加了控制器配置字段。
+使用与后端一致的 IDL 重新构建 SDK 后，左右臂只读配置查询均通过。
+若日志已显示手柄 6DoF 就绪，随后卡在 SDK/参考系阶段，应检查 SDK 协议版本，
+无需重新配置 PICO Wi-Fi。启动日志区分初始化、命令源、参考系和使能阶段。
+
+## 双臂笛卡尔阻抗遥操
+
+使用 `--control-mode impedance`，不加 `--single-arm`：
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --robot-ip 192.168.3.232 --enable-motion \
+  --control-mode impedance --operator-frame face-to-face
+```
+
+本机与 alpha.20261016 配套的构建入口是
+`./build_dual_fdcc_1016/bin/app_peripherals_pico_bridge`，支持以上相同参数。
+它沿用 B3 支架坐标映射；face-to-face 时物理右手控制机器人左臂，物理左手
+控制机器人右臂。每臂独立 Grip、目标校验和 worker，分别进入 mode=5，由控制柜
+执行 CST 笛卡尔阻抗；每臂 DDS 平衡点更新最高 200 Hz，不代表实测运动带宽。
+
+两臂采用相同的 K/D 和入口整形配置：默认 SpaceMouse 档，K=`400,400,400,30,30,30`，
+D=`30,30,30,2,2,2`；`--impedance-profile hold` 同时切换两臂到原柔软档。
+仍可用 `--impedance-stiffness/damping` 覆盖。入口速度/加速度为 0.15 m/s、0.6 m/s²。
+
+- 启动前要求两臂均为 mode=0；每臂首次平衡点从自己的实测 TCP 建立。
+- 松开一侧 Grip，只退出该臂阻抗并阻尼停稳；另一臂继续跟随。
+- 单侧跟踪丢失、Jacobian 过期或目标拒绝，仅暂停该侧，恢复后需松开再握紧。
+- 共享输入断流暂停两臂；任一臂故障、失去 SDK 控制权或目标发送失败结束整个会话。
+- Ctrl+C 先取消两臂未发目标，再等待各自退出，最后请求并回读两臂下使能。
+- 保留 Trigger 夹爪控制；未安装夹爪时加 `--no-gripper`。阻抗禁用 J6 摇杆，
+  不使用 FDCC 虚拟目标放大，也不回退为 ServoP/ServoJ。
+
+每臂输出 `shape_gap_mm` / `follow_err_mm` / `check` / `rearm`，用于区分整形、
+实际跟随和检查等待。已通过无硬件测试及兼容 SDK 编译；实机 CST 切换与跟随效果
+尚未验证，需控制柜支持相应阻抗接口及有效动力学配置。
+
 ## 独立 i3 单臂：Pico 右手柄
 
 在同一 bridge 中增加 `--single-arm`，连接 SDK 的 `Single` 实例。
@@ -142,7 +214,7 @@ URDF，也不改变每次 Grip 对齐头显朝向的行为；恢复原映射使�
 右 Trigger 按下沿切换开合。右 Grip 控制离合，按住 Grip 时摇杆 Y 控制 J6。
 松开 Grip、右手柄断流或丢失跟踪时制动；重连后从当前 TCP 重新离合。
 保留奇异位形减速、目标预检、状态过期/锁存错误停止及退出下使能。
-默认使用 ServoP；单臂可通过 `--control-mode fdcc` 或 `--control-mode impedance` 选择力控模式。默认不加 `--single-arm` 时仍运行双臂 ServoP。
+默认使用 ServoP；单臂可通过 `--control-mode fdcc` 或 `--control-mode impedance` 选择力控模式。双臂也支持 FDCC，笛卡尔阻抗也支持双臂。
 
 Python 启动入口原样透传参数：
 
@@ -257,14 +329,18 @@ RPC 在独立线程中执行，不阻塞手柄读取；已发出的请求需等�
 
 | 参数 | 默认值 | 单位 / 范围 |
 | --- | --- | --- |
-| `--impedance-stiffness` | `120,120,120,20,20,20` | XYZ：0–2000 N/m；RX/RY/RZ：0–150 N·m/rad |
-| `--impedance-damping` | `20,20,20,1,1,1` | XYZ：0–200 N·s/m；RX/RY/RZ：0–60 N·m·s/rad |
+| `--impedance-profile` | `spacemouse` | `spacemouse` 遥操档 / `hold` 原柔软保持档 |
+| `--impedance-stiffness` | `400,400,400,30,30,30` | XYZ：0–2000 N/m；RX/RY/RZ：0–150 N·m/rad |
+| `--impedance-damping` | `30,30,30,2,2,2` | XYZ：0–200 N·s/m；RX/RY/RZ：0–60 N·m·s/rad |
 | `--impedance-max-speed` | `0.15` | 0.01–0.5 m/s，平衡点速度上限 |
 | `--impedance-max-accel` | `0.6` | 0.05–2 m/s²，平衡点加速度上限 |
 | `--impedance-follow-gain` | `8` | 1–40 /s，入口整形增益 |
 
 K/D 参数必须是六个逗号分隔的数，顺序为 X、Y、Z、RX、RY、RZ。
-默认沿用 SDK 的 hold 基线，其他阻抗参数保留 SDK 默认值：任务空间阻尼
+默认沿用 SDK SpaceMouse 遥操 K/D，较原 hold 档恢复力更强，接触手感也会更硬。
+`--impedance-profile hold` 恢复 K=`120,120,120,20,20,20`、D=`20,20,20,1,1,1`。
+显式 K/D 分别覆盖所选档位，不受参数顺序影响；profile 适用于单臂和双臂阻抗。
+目标速度/加速度仍为 0.15 m/s、0.6 m/s²，其他阻抗参数保留 SDK 默认值：任务空间阻尼
 开启，位置/姿态误差饱和分别为 0.03 m、0.25 rad，前馈 wrench 为零。
 工程范围表示参数合法区间，不代表适用于所有负载的调参范围。
 
@@ -288,3 +364,8 @@ Ctrl+C 退出阻抗并请求、回读下使能。阻抗模式不使用摇杆 J6�
 
 官方 SDK 0.2.0 编译和离线生命周期测试已覆盖此入口，实机跟随、接触和
 CST 切换效果需在对应柜子验证。更新时同时替换可执行文件与遥操共享库。
+
+阻抗启动会打印实际 K/D 与入口整形参数。跟随不佳时先区分：
+`shape_gap_mm` 大是入口目标尚未跟上手柄；`follow_err_mm` 大是实际 TCP 尚未跟上
+已发送的平衡点；`check=WAIT` 表示目标校验过期等待。K/D 对齐 SpaceMouse 不代表
+端到端链路相同，也不表示已验证现场跟随问题修复。

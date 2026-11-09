@@ -37,6 +37,7 @@ sudo usermod -aG dialout "$USER"
 `app_peripherals_bridge` 需要可连通的机器人控制器和匹配版本的 `smrcore_sdk`。standalone 构建时先执行：
 
 ```bash
+sudo apt-get install libxcb1-dev pkg-config
 ./scripts/download.sh
 ./scripts/build.sh --with-sdk ON
 ```

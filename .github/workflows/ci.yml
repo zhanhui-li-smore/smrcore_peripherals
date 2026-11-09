@@ -90,7 +90,7 @@ jobs:
       - name: Build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ patchelf libeigen3-dev
+          sudo apt-get install -y cmake ninja-build g++ patchelf libeigen3-dev libxcb1-dev pkg-config
           python -m pip install 'conan>=2,<3' pytest numpy
       - name: Build readers and tests without robot SDK
         run: |
@@ -136,16 +136,17 @@ jobs:
       - name: Build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ curl
+          sudo apt-get install -y cmake ninja-build g++ curl libxcb1-dev pkg-config
           python -m pip install 'conan>=2,<3'
       - name: Download exact official SDK release
         run: |
           export SDK_RELEASE_TAG="v$(cat .sdk-version)"
           ./scripts/download.sh
-      - name: Build SpaceMouse and force/torque SDK applications
+      - name: Build SDK bridge applications
         run: |
           ./scripts/build.sh --with-sdk ON --with-pico OFF --tests OFF
           ldd build_Release/install/bin/app_peripherals_bridge | grep librcoresdk
+          build_Release/bin/app_peripherals_keyboard_bridge --help
       - name: Package bridge with SDK runtime and attribution
         run: |
           python scripts/package_release.py --install build_Release/install \

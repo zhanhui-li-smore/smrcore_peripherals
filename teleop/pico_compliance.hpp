@@ -48,13 +48,15 @@ public:
         std::function<void(const rcore::sdk::Pose &)> send;
         std::function<void(const rcore::RobotState &)> validate_feedback;
         std::function<void()> prepare_target;
+        std::function<Eigen::Isometry3d(const std::array<double, 6> &)> joint_fk{};
     };
 
     PicoCompliance(rcore::sdk::Robot &robot, Operations operations,
                    double max_speed, double max_accel, double follow_gain,
-                   double target_feedforward = 0.0)
+                   double target_feedforward = 0.0, bool direct_target = false, double joint_max_speed_rad_s = 0.0)
         : robot_(robot), operations_(std::move(operations)),
-          limiter_(max_speed, max_accel, follow_gain, target_feedforward), worker_([this] { Run(); }) {}
+          limiter_(max_speed, max_accel, follow_gain, target_feedforward),
+          direct_target_(direct_target), joint_max_speed_rad_s_(joint_max_speed_rad_s), worker_([this] { Run(); }) {}
     virtual ~PicoCompliance() { Stop(); }
     PicoCompliance(const PicoCompliance &) = delete;
     PicoCompliance &operator=(const PicoCompliance &) = delete;
@@ -76,11 +78,26 @@ public:
         Submit(target, valid_until, target);
     }
     void Submit(const Eigen::Isometry3d &target, Clock::time_point valid_until,
-                const Eigen::Isometry3d &raw)
+                const Eigen::Isometry3d &raw,
+                const std::optional<std::array<double, 6>> &joints = std::nullopt)
     {
         if (!target.matrix().allFinite() || !raw.matrix().allFinite())
         {
             throw Error("nonfinite target");
+        }
+        if (joint_max_speed_rad_s_ > 0.0)
+        {
+            if (!joints)
+            {
+                throw Error("joint-limited impedance requires approved IK joints");
+            }
+            for (double value : *joints)
+            {
+                if (!std::isfinite(value))
+                {
+                    throw Error("nonfinite approved IK joints");
+                }
+            }
         }
         std::lock_guard<std::mutex> lock(mutex_);
         if (stop_ || status_.phase == Phase::Stopping || status_.rearm_required ||
@@ -104,6 +121,7 @@ public:
         wanted_ = true;
         target_ = target;
         raw_target_ = raw;
+        target_joints_ = joints;
         valid_until_ = valid_until;
         wake_.notify_all();
     }
@@ -274,17 +292,56 @@ private:
         }
         throw Error("mode feedback timeout");
     }
+    void EmergencyStopAfterExitFailure()
+    {
+        // A failed CST exit is not a normal motion stop. Ordinary Disable may
+        // be rejected while CST remains active, so explicitly request EStop.
+        try
+        {
+            Check(robot_.EStop(), "EStop after compliance exit failure");
+            mode_owned_ = false;
+        }
+        catch (const std::exception &error)
+        {
+            Fail(error.what());
+        }
+        catch (...)
+        {
+            Fail("emergency stop after compliance exit failure raised an exception");
+        }
+        try
+        {
+            Check(robot_.Disable(), "Disable after compliance exit failure");
+        }
+        catch (const std::exception &error)
+        {
+            Fail(error.what());
+        }
+        catch (...)
+        {
+            Fail("Disable after compliance exit failure raised an exception");
+        }
+    }
     void ExitMode()
     {
         if (mode_owned_)
         {
-            operations_.disable();
-            WaitMode(0, 0, false);
-            mode_owned_ = false;
+            try
+            {
+                operations_.disable();
+                WaitMode(0, 0, false);
+                mode_owned_ = false;
+            }
+            catch (...)
+            {
+                EmergencyStopAfterExitFailure();
+                throw;
+            }
         }
         limiter_.Reset();
         last_sent_ = {};
         last_pose_.reset();
+        last_joints_.reset();
     }
     bool EnterMode(uint64_t generation)
     {
@@ -321,6 +378,7 @@ private:
             for (;;)
             {
                 Eigen::Isometry3d target, raw;
+                std::optional<std::array<double, 6>> joints;
                 Clock::time_point valid_until;
                 uint64_t generation;
                 bool wanted;
@@ -338,6 +396,7 @@ private:
                     wanted = wanted_;
                     target = target_;
                     raw = raw_target_;
+                    joints = target_joints_;
                     valid_until = valid_until_;
                     generation = generation_;
                 }
@@ -387,6 +446,7 @@ private:
                     (valid_until - std::chrono::milliseconds(200)).time_since_epoch()).count();
                 const bool waiting_for_check = now > valid_until;
                 Eigen::Isometry3d sent;
+                auto next_joints = last_joints_;
                 if (waiting_for_check)
                 {
                     // Keep the last sent equilibrium point, without switching
@@ -394,6 +454,39 @@ private:
                     sent = last_pose_.value_or(measured);
                     next_limiter.Reset();
                     (void)next_limiter.Update(sent, sent, 0.0);
+                }
+                else if (joint_max_speed_rad_s_ > 0.0)
+                {
+                    if (!joints || !operations_.joint_fk)
+                    {
+                        throw Error("joint target or FK callback missing");
+                    }
+                    if (!last_joints_)
+                    {
+                        std::array<double, 6> seed{};
+                        for (size_t i = 0; i < seed.size(); ++i)
+                        {
+                            seed[i] = state.positions[i];
+                        }
+                        next_joints = LimitJointTargetStep(seed, seed, 0.0, joint_max_speed_rad_s_);
+                        sent = measured;
+                    }
+                    else
+                    {
+                        next_joints = LimitJointTargetStep(*last_joints_, *joints, dt, joint_max_speed_rad_s_);
+                        sent = operations_.joint_fk(*next_joints);
+                        if (!sent.matrix().allFinite())
+                        {
+                            throw Error("nonfinite joint-limited FK");
+                        }
+                    }
+                }
+                else if (direct_target_)
+                {
+                    // Only fresh approved targets reach this branch. Preserve
+                    // generation, expiry, mode and feedback checks around send.
+                    // Seed each activation at measured TCP before direct updates.
+                    sent = last_sent_ == Clock::time_point{} ? measured : target;
                 }
                 else
                 {
@@ -410,9 +503,15 @@ private:
                 {
                     continue;
                 }
+                const double direct_speed = last_pose_ && dt > 0.0 ?
+                    (sent.translation() - last_pose_->translation()).norm() / dt : 0.0;
+                const double direct_angular_speed = last_pose_ && dt > 0.0 ?
+                    Eigen::Quaterniond(sent.linear()).angularDistance(
+                        Eigen::Quaterniond(last_pose_->linear())) / dt : 0.0;
                 const auto started = Clock::now();
                 operations_.send(pose);
                 limiter_ = next_limiter;
+                last_joints_ = next_joints;
                 last_pose_ = sent;
                 last_sent_ = started;
                 const double call_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
@@ -429,8 +528,8 @@ private:
                         target.linear()).angularDistance(Eigen::Quaterniond(sent.linear()));
                     status_.follow_error_deg = radians_to_degrees * Eigen::Quaterniond(
                         sent.linear()).angularDistance(Eigen::Quaterniond(measured.linear()));
-                    status_.target_speed_mps = limiter_.Velocity().norm();
-                    status_.target_angular_speed_rps = limiter_.AngularVelocity().norm();
+                    status_.target_speed_mps = (direct_target_ || joint_max_speed_rad_s_ > 0.0) ? direct_speed : limiter_.Velocity().norm();
+                    status_.target_angular_speed_rps = (direct_target_ || joint_max_speed_rad_s_ > 0.0) ? direct_angular_speed : limiter_.AngularVelocity().norm();
                     status_.guard_age_ms = 200.0 + std::chrono::duration<double, std::milli>(started - valid_until).count();
                     status_.waiting_for_check = waiting_for_check;
                     if (wanted_ && generation_ == generation)
@@ -459,14 +558,10 @@ private:
         catch (const std::exception &error)
         {
             Fail(error.what());
-            try { robot_.Motion().StopMotion(); } catch (...) {}
-            try { robot_.Disable(); } catch (...) {}
         }
         catch (...)
         {
             Fail("cleanup unknown exception");
-            try { robot_.Motion().StopMotion(); } catch (...) {}
-            try { robot_.Disable(); } catch (...) {}
         }
         std::lock_guard<std::mutex> lock(mutex_);
         if (status_.error.empty())
@@ -485,12 +580,16 @@ private:
     Eigen::Isometry3d raw_target_ = Eigen::Isometry3d::Identity();
     Clock::time_point valid_until_{};
     std::optional<Clock::time_point> input_deadline_;
+    std::optional<std::array<double, 6>> target_joints_; // Protected by mutex_.
     // Worker-owned state below.
     bool mode_owned_ = false;
     double last_stamp_ = 0.0;
     Clock::time_point last_feedback_{}, last_sent_{};
     std::optional<Eigen::Isometry3d> last_pose_;
     FdccTargetLimiter limiter_;
+    std::optional<std::array<double, 6>> last_joints_;
+    const bool direct_target_;
+    const double joint_max_speed_rad_s_;
     std::thread worker_;
 };
 } // namespace smrcore::peripherals::detail

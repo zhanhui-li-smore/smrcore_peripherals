@@ -22,15 +22,17 @@ namespace sdk { enum class CommandSource { Unclaimed, Sdk, TeachPendant }; }
 enum class TeleopInputSource { Manual, SpaceMouse };
 struct Errors { int count=0; int GetLatchedErrorCount() const { return count; } };
 struct RobotState {
+ std::array<double,6> positions{};
  double timestamp=1; int control_mode=0; bool cartesian_valid=true;
  std::string reference_frame="base"; Errors errors;
  sdk::CommandSource command_source=sdk::CommandSource::Sdk;
  std::array<double,3> cartesian_position{},cartesian_orientation{};
 };
 namespace sdk {
+using JointPositions = std::array<double,6>;
 struct Pose { std::array<double,3> t{},r{}; auto& tvec(){return t;} auto& rvec(){return r;} };
 struct Result {
- bool ok=true; bool IsSuccess()const{return ok;} int GetErrorCode()const{return ok?0:4311;}
+ bool ok=true; int code=4314; bool IsSuccess()const{return ok;} int GetErrorCode()const{return ok?0:code;}
  std::string GetErrorMsg()const{return "injected impedance failure";}
 };
 struct CartesianImpedanceParams {
@@ -40,15 +42,18 @@ struct CartesianImpedanceParams {
  double position_error_saturation=.03, orientation_error_saturation=.25;
 };
 struct Robot {
- std::atomic<int> mode{0},enabled{0},sent{0},exited{0},disabled{0},stops{0},manual{0};
+ std::atomic<int> mode{0},enabled{0},sent{0},exited{0},disabled{0},stops{0},manual{0},estops{0};
+ std::atomic<bool> motor_enabled{true};
+ std::atomic<int> settling_replies{0};
  std::atomic<int> reported_mode{-1},enable_delay_ms{0},exit_delay_ms{0},send_delay_ms{0};
  std::atomic<bool> connected{true},fault{false},freeze_stamp{false},bad_tcp{false},owned{true};
  std::atomic<bool> fail_enable{false},fail_send{false},fail_exit{false},fail_manual{false};
- std::atomic<bool> in_send{false};
+ std::atomic<bool> in_send{false}, fail_fk{false}, bad_fk{false};
  std::atomic<double> x{.3};
  std::mutex mutex; std::vector<Pose> poses;
  std::vector<std::chrono::steady_clock::time_point> writes;
  CartesianImpedanceParams received;
+ Result ForwardKinematics(const JointPositions& q, Pose& p){if(fail_fk){return {false};}for(int i=0;i<3;++i){p.t[i]=q[i];p.r[i]=q[i+3];}if(bad_fk){p.t[0]=NAN;}return {};}
  Robot& Control(){return *this;} Robot& Motion(){return *this;}
  bool IsConnected(){return connected;}
  RobotState GetState(){
@@ -56,7 +61,7 @@ struct Robot {
   s.errors.count=fault?1:0;
   s.command_source=owned?CommandSource::Sdk:CommandSource::TeachPendant;
   s.timestamp=freeze_stamp?1:std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-  s.cartesian_position={bad_tcp?NAN:x.load(),-.2,.1}; return s;
+  s.positions={x.load(),-.2,.1,0,0,0};s.cartesian_position={bad_tcp?NAN:x.load(),-.2,.1}; return s;
  }
  Result EnableCartesianImpedance(CartesianImpedanceParams p){
   { std::lock_guard<std::mutex> lock(mutex); received=p; }
@@ -75,9 +80,11 @@ struct Robot {
  }
  Result DisableCartesianImpedance(){
   ++exited; std::this_thread::sleep_for(std::chrono::milliseconds(exit_delay_ms.load()));
+  if(settling_replies>0){--settling_replies;return {false,4311};}
   if(!fail_exit){mode=0;} return {!fail_exit};
  }
- Result Disable(){++disabled;return {};}
+ Result Disable(){++disabled;if(mode==5){return {false};}motor_enabled=false;return {};}
+ Result EStop(){++estops;mode=0;motor_enabled=false;return {};}
  void StopMotion(){++stops;}
  // No FDCC APIs, ServoP, ServoJ, gains/force-source persistence or safety setters.
 };
@@ -121,6 +128,77 @@ int main(){
     for(size_t i=1;i<r.writes.size();++i){assert(r.writes[i]-r.writes[i-1]>=std::chrono::milliseconds(5));}
   }
  }
+ // Direct impedance skips host shaping after measured seed, retains expiry/release.
+ {
+  rcore::sdk::Robot r; PicoImpedance w(r,k,d,.15,.6,8,true);
+  auto target=Target(.8);
+  target.linear()=Eigen::AngleAxisd(.4,Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  w.Submit(target,Clock::now()+std::chrono::milliseconds(150));
+  Until([&]{return r.sent>=2;});
+  { std::lock_guard<std::mutex> lock(r.mutex);
+    assert(r.poses.front().t[0]==.3);
+    assert(std::abs(r.poses.at(1).t[0]-.8)<1e-9);
+    assert(std::abs(r.poses.at(1).r[2]-.4)<1e-9);
+  }
+  Until([&]{return w.Snapshot().rearm_required && w.Snapshot().phase==Phase::Holding;});
+  assert(r.mode==0 && r.exited==1);
+  const auto count=r.sent.load();Submit(w);
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));assert(r.sent==count);
+  assert(w.AcknowledgeGripRelease());r.x=.6;Submit(w);
+  Until([&]{return r.sent>count;});
+  { std::lock_guard<std::mutex> lock(r.mutex);assert(r.poses.at(count).t[0]==.6); }
+  w.Stop();assert(w.Snapshot().error.empty());
+ }
+ // Joint reference rate is bounded in radians, including long gaps and reversals.
+ {
+  constexpr double pi=3.14159265358979323846;
+  std::array<double,6> q{}, wanted{2,-1,3,-4,5,-6};
+  auto next=LimitJointTargetStep(q,wanted,.005,pi);
+  for(size_t i=0;i<6;++i){assert(std::abs(next[i]-q[i])<=pi*.005+1e-12);}
+  next=LimitJointTargetStep(q,wanted,2.,pi);
+  for(size_t i=0;i<6;++i){assert(std::abs(next[i]-q[i])<=pi*.02+1e-12);}
+  auto reverse=LimitJointTargetStep(next,q,.005,pi);
+  for(size_t i=0;i<6;++i){assert(std::abs(reverse[i]-next[i])<=pi*.005+1e-12);}
+  assert(LimitJointTargetStep(q,wanted,0.,pi)==q);
+  bool rejected=false;wanted[0]=NAN;
+  try{LimitJointTargetStep(q,wanted,.005,pi);}catch(...){rejected=true;}assert(rejected);
+ }
+ // Real worker limits IK reference joints then FK; first seed, expiry and release remain.
+ {
+  constexpr double pi=3.14159265358979323846;
+  rcore::sdk::Robot r;PicoImpedance w(r,k,d,.15,.6,8,false,180);
+  bool rejected=false;try{Submit(w);}catch(...){rejected=true;}assert(rejected && r.enabled==0);
+  std::array<double,6> q{2,-.2,.1,0,0,1};
+  w.Submit(Target(2),Clock::now()+std::chrono::milliseconds(130),Target(2),q);
+  Until([&]{return r.sent>=4;});
+  Until([&]{return w.Snapshot().rearm_required && w.Snapshot().phase==Phase::Holding;});
+  {std::lock_guard<std::mutex> lock(r.mutex);
+   assert(r.poses.front().t[0]==.3);
+   for(size_t i=1;i<r.poses.size();++i){
+    double dt=std::chrono::duration<double>(r.writes[i]-r.writes[i-1]).count();
+    for(size_t axis=0;axis<3;++axis){
+     assert(std::abs(r.poses[i].t[axis]-r.poses[i-1].t[axis])<=pi*dt+1e-4);
+     assert(std::abs(r.poses[i].r[axis]-r.poses[i-1].r[axis])<=pi*dt+1e-4);
+    }
+   }
+   assert(r.poses.back().t[0]<2);
+  }
+  auto count=r.sent.load();assert(w.AcknowledgeGripRelease());r.x=.6;
+  w.Submit(Target(2),Clock::now()+std::chrono::seconds(1),Target(2),q);
+  Until([&]{return r.sent>count;});w.Pause();
+  Until([&]{return w.Snapshot().phase==Phase::Holding;});
+  {std::lock_guard<std::mutex> lock(r.mutex);assert(r.poses.at(count).t[0]==.6);}
+  w.Stop();assert(w.Snapshot().error.empty());
+ }
+ // Failed/nonfinite FK never sends the candidate after the measured seed.
+ for(int failure:{0,1}){
+  rcore::sdk::Robot r;r.fail_fk=failure==0;r.bad_fk=failure==1;
+  PicoImpedance w(r,k,d,.15,.6,8,false,180);
+  std::array<double,6> q{2,-.2,.1,0,0,1};
+  w.Submit(Target(2),Clock::now()+std::chrono::seconds(1),Target(2),q);
+  Until([&]{return !w.Snapshot().error.empty();});w.Stop();
+  assert(r.sent==1 && r.exited>=1);
+ }
  // Release cancels in-flight Enable; re-grip cannot skip damping exit.
  {
   rcore::sdk::Robot r;r.enable_delay_ms=80;r.exit_delay_ms=100;PicoImpedance w(r,k,d);Submit(w);
@@ -128,6 +206,30 @@ int main(){
   Until([&]{return r.exited==1;});assert(w.Snapshot().phase==Phase::Stopping);Submit(w);
   Until([&]{return w.Snapshot().phase==Phase::Holding;});
   assert(r.sent==0 && r.enabled==1);w.Stop();
+ }
+ // A moving release may require multiple backend settling windows. It must
+ // keep targets stopped and never re-enable while the stop is in progress.
+ {
+  rcore::sdk::Robot r;r.settling_replies=2;r.exit_delay_ms=60;
+  PicoImpedance w(r,k,d);Submit(w);Until([&]{return r.sent>0;});w.Pause();
+  Until([&]{return r.exited==1;});const auto sent=r.sent.load();Submit(w);
+  Until([&]{return w.Snapshot().phase==Phase::Holding;});
+  assert(r.exited==3 && r.estops==0 && r.disabled==0 && r.motor_enabled);
+  assert(r.sent==sent && r.enabled==1 && r.mode==0);
+  w.Stop();assert(w.Snapshot().error.empty());
+ }
+ // Persistent non-settling is bounded; real faults/ownership loss/disconnection
+ // during the settling reply must not be retried.
+ for(int failure:{0,1,2,3}){
+  rcore::sdk::Robot r;r.settling_replies=10;r.exit_delay_ms=80;
+  PicoImpedance w(r,k,d);Submit(w);Until([&]{return r.sent>0;});w.Pause();
+  Until([&]{return r.exited==1;});
+  if(failure==1){r.fault=true;}
+  else if(failure==2){r.owned=false;}
+  else if(failure==3){r.connected=false;}
+  Until([&]{return !w.Snapshot().error.empty();});w.Stop();
+  assert(r.estops==1 && !r.motor_enabled && r.mode==0);
+  assert(r.exited==(failure==0?3:1));
  }
  // Never publish a target before the mode acknowledgement, or after lost ownership.
  {
@@ -146,7 +248,7 @@ int main(){
   PicoImpedance w(r,k,d);Submit(w);
   if(failure==3){Until([&]{return r.sent>0;});r.fail_exit=true;w.Pause();}
   Until([&]{return !w.Snapshot().error.empty();});w.Stop();assert(r.exited>0);
-  if(failure==3){assert(r.disabled>0 && r.stops>0);}else{assert(r.mode==0);}
+  if(failure==3){assert(r.estops==1 && !r.motor_enabled && r.mode==0);}else{assert(r.mode==0);}
  }
  // Mode loss, disconnection, latched fault, nonfinite and frozen feedback end session.
  for(int failure:{0,1,2,3,4}){
@@ -242,7 +344,11 @@ int main(){
  assert(o.control_mode==smrcore::peripherals::PicoControlMode::ServoP);
  assert(o.fdcc_max_speed==.30 && o.fdcc_max_accel==1.2 && o.fdcc_follow_gain==8);
  assert(o.fdcc_target_feedforward==.5 && o.fdcc_target_scale==1);
+ assert(o.fdcc_damping_factor==.9);
+ assert(o.fdcc_error_scale==1.);
  assert(o.impedance_max_speed==.15 && o.impedance_max_accel==.6);
+ assert(o.impedance_stiffness[0]==400 && o.impedance_stiffness[5]==30);
+ assert(o.impedance_damping[0]==30 && o.impedance_damping[5]==2);
  assert(parse({"--single-arm","--robot-ip","192.0.2.1","--control-mode","fdcc",
   "--single-mapping-yaw","-90","--motion-scale","1","--enable-motion","--no-gripper"}));
  assert(o.fdcc_max_speed==.30 && o.fdcc_max_accel==1.2 && o.fdcc_follow_gain==8);
@@ -277,8 +383,54 @@ int main(){
  assert(o.fdcc_target_feedforward==.5);
  assert(parse({"--control-mode","fdcc","--fdcc-target-feedforward","0"}));
  assert(o.fdcc_target_feedforward==0);
+ assert(parse({"--fdcc-damping-factor","0.7"}));
+ assert(o.fdcc_damping_factor==.7);
+ for(const char* bad:{"-0.1","1.1","nan","inf","0.7x"}){
+  assert(!parse({"--fdcc-damping-factor",bad}));
+ }
+ assert(!parse({"--fdcc-damping-factor"}));
+ assert(parse({"--fdcc-error-scale","2"}));
+ assert(o.fdcc_error_scale==2);
+ for(const char* bad:{"0","-0.1","4.1","nan","inf","2x"}){
+  assert(!parse({"--fdcc-error-scale",bad}));
+ }
+ assert(!parse({"--fdcc-error-scale"}));
  assert(!parse({"--fdcc-target-feedforward","nan"}));
  assert(!parse({"--fdcc-target-feedforward"}));
+ // Named profiles select only K/D; per-field overrides win in either order.
+ for(bool profile_first:{false,true}) {
+  o=Options{};
+  assert(parse({"--single-arm","--control-mode","impedance"}));
+  if(profile_first) {
+   assert(parse({"--impedance-profile","hold","--impedance-stiffness","100,110,120,10,11,12"}));
+  } else {
+   assert(parse({"--impedance-stiffness","100,110,120,10,11,12","--impedance-profile","hold"}));
+  }
+  assert(o.impedance_stiffness[0]==100 && o.impedance_damping[0]==20 && o.impedance_damping[5]==1);
+  assert(o.impedance_max_speed==.15 && o.impedance_max_accel==.6);
+  assert(parse({"--impedance-profile","spacemouse"}));
+  assert(o.impedance_stiffness[0]==400 && o.impedance_damping[5]==2);
+ }
+ o=Options{};
+ assert(parse({"--control-mode","impedance","--impedance-profile","hold"}));
+ assert(!o.single_arm && o.impedance_stiffness[0]==120);
+ o=Options{};
+ assert(!parse({"--impedance-profile","hold"}));
+ assert(!parse({"--single-arm","--control-mode","fdcc","--impedance-profile","spacemouse"}));
+ assert(!parse({"--single-arm","--control-mode","impedance","--impedance-profile","bad"}));
+ assert(!parse({"--impedance-profile"}));
+ o=Options{};
+ assert(parse({"--control-mode","impedance","--impedance-joint-max-speed","180"}));
+ assert(o.impedance_joint_max_speed_deg==180);
+ o=Options{};assert(!parse({"--control-mode","impedance","--impedance-joint-max-speed","181"}));
+ o=Options{};assert(!parse({"--impedance-joint-max-speed","180"}));
+ o=Options{};assert(!parse({"--control-mode","impedance","--impedance-joint-max-speed","180","--impedance-direct-target"}));
+
+ o=Options{};
+ assert(parse({"--control-mode","impedance","--impedance-direct-target"}));
+ assert(o.impedance_direct_target);
+ o=Options{};assert(!parse({"--impedance-direct-target"}));
+ o=Options{};assert(!parse({"--control-mode","fdcc","--impedance-direct-target"}));
 }
 ''')
         with tempfile.TemporaryDirectory() as directory:

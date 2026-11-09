@@ -31,3 +31,7 @@
 - ci.yml: collects all offline Python tests, including single-arm mapping,
   nonfinite input and FDCC/impedance workers; installs Eigen headers for the
   C++ fault-injection harnesses without requiring robot hardware.
+
+- ci.yml: SDK bridge Linux build includes keyboard teleoperation; --help checks built executable loading without input or robot access.
+
+- ci.yml / release-smoke.yml: Linux SDK keyboard builds use libxcb1-dev; reader CI compiles offline input/cleanup tests without a desktop or robot.

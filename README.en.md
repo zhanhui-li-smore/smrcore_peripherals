@@ -3,7 +3,7 @@
   <img src="docs/site/assets/logo.png" alt="Smartmore Robotics" width="120">
 </p>
 <h1 align="center">smrcore_peripherals</h1>
-<p align="center"><strong>Peripheral input and robot integration examples for SpaceMouse, force/torque sensors, Pico and master–follower arms.</strong></p>
+<p align="center"><strong>Peripheral input and robot integration examples for SpaceMouse, force/torque sensors, Pico, master–follower arms and keyboards.</strong></p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License: Apache 2.0"></a>
   <a href="https://zhanhui-li-smore.github.io/smrcore_peripherals/"><img src="https://img.shields.io/badge/Docs-online-brightgreen" alt="Documentation"></a>
@@ -25,6 +25,7 @@ The repository provides readers, protocols and application examples. Readers are
 | [Force/torque sensor](docs/site/ft-sensor.md) | C++ / Python | SDK Peripheral sample API and calibration |
 | [Pico](docs/site/pico.md) | C++ / Python | Dual-arm ServoP and grippers; Python can launch the C++ bridge |
 | [Master–follower arms](docs/site/zhonglin.md) | Python | SDK ServoJ follower control |
+| [Keyboard](docs/site/keyboard.md) | Terminal keyboard input | SDK ServoRelativeP / ServoJ, single / simultaneous dual arms |
 
 ## Downloads and documentation
 

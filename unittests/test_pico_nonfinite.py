@@ -21,7 +21,7 @@ class PicoNonfiniteTest(unittest.TestCase):
 #include <Eigen/Geometry>
 #include "peripherals/types.hpp"
 using namespace smrcore::peripherals;
-constexpr double kInputStaleSeconds = .25;
+constexpr double kInputStaleSeconds = .40;
 namespace rcore::sdk {
 struct Pose {
     std::array<double, 3> t{}, r{};

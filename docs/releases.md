@@ -2,7 +2,7 @@
 
 [下载正式版本](https://github.com/zhanhui-li-smore/smrcore_peripherals/releases) · [查看开发构建](https://github.com/zhanhui-li-smore/smrcore_peripherals/actions)
 
-本仓库提供四类外设接入，统一采用“外设输入 → 应用 → 机器人 SDK”的分层。只读采样不连接机器人；需要运动或夹爪控制时运行对应应用。
+本仓库提供五类外设接入，统一采用“外设输入 → 应用 → 机器人 SDK”的分层。只读采样不连接机器人；需要运动或夹爪控制时运行对应应用。
 
 ## 支持的链路
 
@@ -12,6 +12,7 @@
 | 六维力传感器 | C++ / Python | SDK Peripheral 样本接口与静态标定 | C++ 预编译 bridge / Python 示例 |
 | Pico | C++ / Python | 双臂 ServoP、末端夹爪 | C++ 源码示例 / Python 启动入口 |
 | 主从臂 | Python | ServoJ 从臂跟随 | Python 源码示例 |
+| 键盘 | Terminal / dry-run | ServoRelativeP / ServoJ 单臂 / 双臂同时控制 | C++ SDK bridge |
 
 Pico 的 Python 入口启动同一 C++ 程序；主从臂的 Python 示例直接调用机器人 Python SDK。两者都沿用外设读取与机器人控制分离的结构。
 
@@ -22,7 +23,7 @@ Pico 的 Python 入口启动同一 C++ 程序；主从臂的 Python 示例直接
 | 文件 | 用途与包含内容 |
 |---|---|
 | `smrcore_peripherals-cpp-linux-x86_64-v<version>.tar.gz` | C++ 外设库、头文件、读取程序和 Python 示例；不带机器人 SDK |
-| `smrcore_peripherals-sdk-bridge-linux-x86_64-v<version>.tar.gz` | 上述外设组件，加 SpaceMouse / 六维力 bridge、标定程序和配套 C++ SDK 运行库 |
+| `smrcore_peripherals-sdk-bridge-linux-x86_64-v<version>.tar.gz` | 上述外设组件，加 SpaceMouse / 六维力 bridge、键盘遥操、标定程序和配套 C++ SDK 运行库 |
 | `rcore_peripherals_py-<version>-cp3xx-cp3xx-linux_x86_64.whl` | Python 外设读取库；按解释器选择一个 wheel，不含机器人 SDK |
 | `smrcore_peripherals-manual-zh-v<version>.pdf/html` | 中文说明书 |
 | `smrcore_peripherals-manual-en-v<version>.pdf/html` | 英文说明书 |
@@ -50,10 +51,13 @@ python3 -m pip install ./rcore_peripherals_py-<version>-cp310-cp310-linux_x86_64
 
 ## SDK 与构型
 
-- 预编译 SpaceMouse / 六维力 bridge 配套 SDK **0.2.0**，由 `.sdk-version` 固定。压缩包内 `build-info.json` 记录源码提交和 SDK 版本。
+- 预编译 SpaceMouse / 六维力 / 键盘 bridge 配套 SDK **0.2.0**，由 `.sdk-version` 固定。压缩包内 `build-info.json` 记录源码提交和 SDK 版本。
 - Pico 需要带 `sdk/dual_arm_robot.hpp` 的配套 C++ SDK。当前固定的官方 SDK 包缺少此头文件，因此 **Pico 遥操程序不在预编译包中**，需使用包含此接口的配套 SDK 从源码构建。示例内置 B3 支架变换。
 - 主从臂示例保留当前主臂与单臂 i3 的标定映射；具体硬件与标定见主从臂说明。
 - 库、头文件与运行库须配套更新。构建检查不代表实机验收；使用运动应用前确认构型、工具、工作区和急停。
+
+
+键盘程序在当前终端运行，需要系统库 `libxcb1`；本地 X11 桌面支持连续按键，无桌面时自动使用有限步长点动，也可显式加 `--terminal`。
 
 ## 版本识别
 

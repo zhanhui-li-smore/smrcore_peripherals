@@ -20,7 +20,8 @@ def assemble(language):
     ]
     devices = [(name, f'docs/site/{stem}' + ('.zh.md' if zh else '.md')) for name, stem in [
         ('SpaceMouse', 'spacemouse'), ('六维力传感器' if zh else 'Force/torque sensor', 'ft-sensor'),
-        ('Pico', 'pico'), ('主从臂' if zh else 'Master–follower arms', 'zhonglin')]]
+        ('Pico', 'pico'), ('主从臂' if zh else 'Master–follower arms', 'zhonglin'),
+        ('键盘' if zh else 'Keyboard', 'keyboard')]]
     sources.insert(1, ('外设接入' if zh else 'Peripheral integration', devices))
     chapters = [history(language)]
     for i, (title, source) in enumerate(sources, 1):

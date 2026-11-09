@@ -2,7 +2,7 @@
 
 [Release downloads](https://github.com/zhanhui-li-smore/smrcore_peripherals/releases) · [Development builds](https://github.com/zhanhui-li-smore/smrcore_peripherals/actions)
 
-Four peripheral chains share the structure “input → application → robot SDK”. Readers do not connect to robots; run the corresponding application for motion or gripper control.
+Five peripheral chains share the structure “input → application → robot SDK”. Readers do not connect to robots; run the corresponding application for motion or gripper control.
 
 ## Supported chains
 
@@ -12,6 +12,7 @@ Four peripheral chains share the structure “input → application → robot SD
 | Force/torque sensor | C++ / Python | SDK Peripheral sample API and static calibration | Prebuilt C++ bridge / Python example |
 | Pico | C++ / Python | Dual-arm ServoP and grippers | C++ source example / Python launcher |
 | Master–follower arms | Python | ServoJ follower control | Python source example |
+| Keyboard | Terminal / dry-run | ServoRelativeP / ServoJ single / simultaneous dual arms | C++ SDK bridge |
 
 The Pico Python launcher runs the C++ bridge. The master–follower Python example calls the robot Python SDK directly. Both keep peripheral input separate from robot control.
 
@@ -22,7 +23,7 @@ Platform: **Ubuntu 22.04 / Linux x86_64**. Wheels support **CPython 3.10, 3.11 a
 | File | Contents and purpose |
 |---|---|
 | `smrcore_peripherals-cpp-linux-x86_64-v<version>.tar.gz` | C++ library, headers, readers and Python examples; no robot SDK |
-| `smrcore_peripherals-sdk-bridge-linux-x86_64-v<version>.tar.gz` | Peripheral components plus SpaceMouse / F/T bridges, calibration and the matching C++ SDK runtime |
+| `smrcore_peripherals-sdk-bridge-linux-x86_64-v<version>.tar.gz` | Peripheral components plus SpaceMouse / F/T bridges, keyboard teleoperation, calibration and the matching C++ SDK runtime |
 | `rcore_peripherals_py-<version>-cp3xx-cp3xx-linux_x86_64.whl` | Python peripheral readers; choose one matching interpreter; no robot SDK |
 | `smrcore_peripherals-manual-zh-v<version>.pdf/html` | Chinese manual |
 | `smrcore_peripherals-manual-en-v<version>.pdf/html` | English manual |
@@ -50,10 +51,13 @@ For a complete download use `sha256sum -c SHA256SUMS`. For one archive download 
 
 ## SDK and robot configuration
 
-- Prebuilt SpaceMouse / F/T bridges use SDK **0.2.0**, pinned in `.sdk-version`. Each C++ archive records the commit and SDK in `build-info.json`.
+- Prebuilt SpaceMouse / F/T / keyboard bridges use SDK **0.2.0**, pinned in `.sdk-version`. Each C++ archive records the commit and SDK in `build-info.json`.
 - Pico needs a matching C++ SDK including `sdk/dual_arm_robot.hpp`. The currently pinned official package omits this header, so **prebuilt archives do not include the Pico teleoperation binary**. Build it from source with a matching SDK that provides this interface. The example embeds B3 mounting transforms.
 - The master–follower example retains its calibrated master/single-i3 mapping. See that guide for hardware and calibration details.
 - Update headers and runtime together. Build validation is not hardware acceptance; verify the robot configuration, tool, workspace and emergency stop before motion.
+
+
+The keyboard executable runs in the current terminal and requires `libxcb1`. Local X11 desktops support continuous held keys; text-only sessions or explicit `--terminal` use bounded jogs.
 
 ## Version identity
 

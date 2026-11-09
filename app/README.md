@@ -15,6 +15,7 @@
 ./scripts/build.sh --with-sdk OFF --tests ON
 
 # 需要机器人 bridge / F/T 标定时（仅此时编译 SDK 相关目标）
+sudo apt-get install libxcb1-dev pkg-config
 ./scripts/download.sh
 ./scripts/build.sh --with-sdk ON --tests ON
 ```
@@ -29,6 +30,7 @@
 | `app_peripherals_read_ft_sensor` | 串口六维力矩流，含 `WaitForFirstSample` 与完整串口 CLI |
 | `app_peripherals_read_pico` | PICO WebXR 头显/双手柄读数，不连接机器人 |
 | `app_peripherals_bridge` | 通过 `robot.Peripheral().Update*Sample()` 推送 SpaceMouse 和/或 F/T 数据（需 `--with-sdk ON`） |
+| `app_peripherals_keyboard_bridge` | 终端键盘笛卡尔 / 关节遥操，单臂 / 双臂同时控制（`--with-sdk ON`） |
 | `app_peripherals_ft_sensor_calib` | MoveJ 静态六维力标定（需 `--with-sdk ON`；先跑 bridge 注入 raw） |
 | `app_peripherals_pico_bridge` | PICO 双手柄到双臂 SDK ServoP；按住 Grip 后 thumbstick Y 轴直接控制对应手臂 J6（ServoJ，默认 `0.8 rad/s`，可用 `--j6-speed` 调整）；Trigger 按 0/1 映射左右夹爪开/关；仅此程序需要机器人连接（需 `--with-sdk ON`） |
 
@@ -107,6 +109,17 @@ SpaceMouse 遥操同样**不会**由 SDK 示例直接打开 `/dev/input/*`，必
 
 [Pico 读取、B3 双臂遥操、夹爪与参数完整说明](../docs/site/pico.zh.md)。需要 `--with-sdk ON --with-pico ON` 和匹配双臂 SDK。默认发布包不含此程序。
 
+双臂使用 FDCC 时，在原启动命令中加 `--control-mode fdcc`，不加 `--single-arm`：
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --robot-ip <双臂控制柜IP> --enable-motion --control-mode fdcc
+```
+
+左右 Grip 独立进入/退出力控，各臂独立发送目标，最高 50 Hz。
+无夹爪时加 `--no-gripper`。启动、断流恢复及退出行为见
+[双臂 FDCC 使用说明](../docs/site/pico.zh.md#双臂-fdcc-遥操)。
+
 ## 独立 i3 单臂：Pico 右手柄
 
 在同一 bridge 中增加 `--single-arm`，连接 SDK 的 `Single` 实例。
@@ -124,7 +137,7 @@ SpaceMouse 遥操同样**不会**由 SDK 示例直接打开 `/dev/input/*`，必
 松开 Grip、右手柄断流或丢失跟踪时制动；重连后从当前 TCP 重新离合。
 保留奇异位形减速、目标预检、状态过期/锁存错误停止及退出下使能。
 默认使用 ServoP；单臂可通过 `--control-mode fdcc` 或 `--control-mode impedance`
-选择 FDCC 或笛卡尔阻抗。默认不加 `--single-arm` 时仍运行双臂 ServoP。
+选择 FDCC 或笛卡尔阻抗。FDCC 和笛卡尔阻抗均支持单/双臂；默认仍为双臂 ServoP。
 
 Python 启动入口原样透传参数：
 
@@ -135,3 +148,7 @@ python3 python/app/app_peripherals_pico_bridge.py \
 
 参数及暂停/退出行为见 [FDCC 使用说明](../docs/site/pico.zh.md#单臂-fdcc-遥操)
 和 [笛卡尔阻抗使用说明](../docs/site/pico.zh.md#单臂笛卡尔阻抗遥操)。
+
+## 键盘
+
+[单臂 / 双臂同时控制、按键及权限说明](../docs/site/keyboard.md)。

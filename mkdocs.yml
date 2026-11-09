@@ -46,6 +46,7 @@ plugins:
             Troubleshooting: 常见问题
             Platform Setup: 平台配置
             Pico: Pico 读取与遥操
+            Keyboard: 键盘遥操
 
 theme:
   name: material
@@ -87,6 +88,7 @@ nav:
       - Force/Torque Sensor: ft-sensor.md
       - Pico: pico.md
       - Master–Follower Arms: zhonglin.md
+      - Keyboard: keyboard.md
       - Peripheral Readers: readers.md
       - Robot Integration: robot-integration.md
   - C++ Examples: cpp.md

@@ -1,9 +1,29 @@
 > DIR: unittests/
 
+- test_pico_fdcc.py also verifies direct XYZ/orientation target writes despite low shaping limits, measured activation seed, stale-approval hold/resume, and rejected-candidate release latch. No hardware validation.
+
+- FDCC lifecycle/dual-arm fixtures verify damping_factor propagation, 0.9
+  compatibility, 0.7 on both arms and invalid values rejected before activation.
+  Impedance exit failure reproduces ordinary Disable rejection in mode 5 and
+  requires EStop fallback to leave motors disabled. No hardware is exercised.
+  FDCC error_scale tests cover default 1.0, selected multipliers on both arms,
+  unchanged SDK kp/tracking limits and pre-activation rejection of invalid values.
+
+- test_pico_dual_fdcc.py: production dual-arm orchestration and FDCC/impedance workers
+  with the production input-timeout constant: 300ms-old input remains valid,
+  >400ms-old input latches release-required recovery independently of approval age;
+  with injected SDK feedback/RPC; independent Grip/reanchor, tracking/Jacobian/
+  candidate pauses, shared input loss and release-required recovery, slow RPC
+  independence, either-arm faults, cancel-both-before-join and exception cleanup.
+  The fake exposes no ServoP/ServoJ; no robot motion or plant simulation.
+
 - test_pico_fdcc_balance.py: production mode-policy selector + guard + workers,
   high-condition candidate keeps FDCC/mode-6 and impedance/mode-5 active with
   one FK per candidate; ServoP still rejects with seven FK calls.
   IK/FK/finite/clearance errors retained in both compliance modes.
+  Guard fixtures replace the shared FK and measured joints without duplicate
+  declarations; rejection diagnostics distinguish actual/IK clearance and branch crossing
+  independently for J3 and J5.
   Injected 300ms IK delay retains the mode with a fixed last-sent target;
   completion resumes without release. Stale input still latches an exit,
   and late approvals cannot restart it. IK/queue timing uses separate clocks.
@@ -16,7 +36,8 @@
   release acknowledgement, in-flight
   cancellation and DDS write failure. Full CLI parser tested without network.
   CLI also verifies the short FDCC command's built-in profile and normal/advanced
-  help separation, preserving impedance defaults and legacy explicit overrides.
+  help separation, SpaceMouse/hold impedance profiles, mode restrictions and
+  order-independent per-field explicit K/D overrides.
 - test_pico_fdcc.py: production worker + mock SDK: pause/reclutch, delayed
   acknowledgements, canceled in-flight activation, failures/mode loss/stale
   feedback, bounded target rate, expiry and no ServoP/ServoJ calls. Limiter
@@ -56,7 +77,7 @@
 
 - test_weekly_release.py: temporary Git repo checks for initial/patch tags, skip/retry and rollback refusal.
 
-- test_release_notes.py: release identity, four-chain scope, invalid tags and SDK-doc consistency.
+- test_release_notes.py: release identity, supported-chain scope, invalid tags and SDK-doc consistency.
 
 - test_version_history.py: version boundaries, bilingual trailers, unreleased commits and unrelated-tag exclusion.
 
@@ -74,3 +95,21 @@
 - test_pico_single_hand.py: runs actual startup gates with right-only, absent/stale right and held-Grip inputs; no hardware. Python launcher tests include single-arm/gripper flags.
 
 - test_pico_nonfinite.py: injects NaN/Inf and invalid quaternions into actual preflight/send helpers; asserts invalid targets never call the mock SDK.
+
+- test_keyboard_teleop.py: production key/feedback policy and mock-SDK session; bounded concurrent steps, Space pause/resume, stopped space switching, joint seeding/limits, feedback guards and partial Enable/send/Disable cleanup and disabled-feedback verification.
+
+- test_keyboard_terminal.py: production CLI/input in private PTYs with fake SDK; Space/Tab, concurrent jog events, fragmented arrows, paste/focus pause, Ctrl+C/Esc exit and terminal restoration.
+
+
+- test_keyboard_held.py: continuous single/dual keys without autorepeat, real release, focus/tab loss, shortcut pause, joint switch and channel freshness; injected states only.
+
+- test_pico_dual_fdcc.py now runs the shared production orchestration against
+  both actual adapters: independent seed/release/reclutch/rearm, slow writes,
+  pair fault cleanup, impedance SDK ownership loss, K/D propagation and no FDCC
+  calls/extrapolation on impedance. Hardware is never connected.
+
+- test_pico_impedance.py 增加 direct 模式首帧锚定、第二帧平移/旋转直达、过期退出、松手重入及 CLI 模式互斥回归。
+
+- 阻抗关节参考限速测试覆盖 π rad/s 六轴步长、长间隔20ms封顶、换向、首帧/重入锚定、过期退出、FK失败/非有限拒绝和 CLI 180边界/模式互斥；FDCC/dual mock 补充 joint/FK 接口。
+
+- 阻抗松 Grip 回归：4311 两轮后成功不急停、不发送或重入；三轮耗尽以及停稳期间故障/断连/丢失归属保留急停。

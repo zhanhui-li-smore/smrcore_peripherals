@@ -29,6 +29,7 @@ Binaries are built under `build_Release/bin/`:
 | `app_peripherals_read_ft_sensor` | Serial wrench stream with `WaitForFirstSample` and full serial CLI |
 | `app_peripherals_read_pico` | PICO WebXR headset/controller samples without a robot connection |
 | `app_peripherals_bridge` | Push SpaceMouse and/or F/T data via `robot.Peripheral().Update*Sample()` (`--with-sdk ON`) |
+| `app_peripherals_keyboard_bridge` | Terminal Cartesian / joint keyboard teleoperation, single / simultaneous dual arms (`--with-sdk ON`) |
 | `app_peripherals_ft_sensor_calib` | MoveJ static F/T calibration (`--with-sdk ON`; run bridge first for raw) |
 | `app_peripherals_pico_bridge` | PICO dual controllers to dual-arm SDK ServoP; this app owns the robot connection (`--with-sdk ON`) |
 
@@ -110,3 +111,7 @@ default dual-peripheral bridge) via
 ## Pico
 
 [Pico reading and dual-arm teleoperation guide](pico.md).
+
+## Keyboard
+
+[Single / simultaneous dual-arm control, keys and permissions](keyboard.md).

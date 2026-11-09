@@ -46,6 +46,7 @@ jobs:
             curl \
             g++ \
             ninja-build \
+            libxcb1-dev pkg-config \
             python3-pip
           python3 -m pip install --upgrade pip
           python3 -m pip install "conan>=2.0"

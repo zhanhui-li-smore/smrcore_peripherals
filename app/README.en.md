@@ -15,6 +15,7 @@ From the repository root:
 ./scripts/build.sh --with-sdk OFF --tests ON
 
 # Required for robot bridge apps / F/T calibration (SDK targets are only built then)
+sudo apt-get install libxcb1-dev pkg-config
 ./scripts/download.sh
 ./scripts/build.sh --with-sdk ON --tests ON
 ```
@@ -29,6 +30,7 @@ Binaries are built under `build_Release/bin/`:
 | `app_peripherals_read_ft_sensor` | Serial wrench stream with `WaitForFirstSample` and full serial CLI |
 | `app_peripherals_read_pico` | PICO WebXR headset/controller samples without a robot connection |
 | `app_peripherals_bridge` | Push SpaceMouse and/or F/T data via `robot.Peripheral().Update*Sample()` (`--with-sdk ON`) |
+| `app_peripherals_keyboard_bridge` | Terminal Cartesian / joint keyboard teleoperation, single / simultaneous dual arms (`--with-sdk ON`) |
 | `app_peripherals_ft_sensor_calib` | MoveJ static F/T calibration (`--with-sdk ON`; run bridge first for raw) |
 | `app_peripherals_pico_bridge` | PICO dual controllers to dual-arm SDK ServoP; this app owns the robot connection (`--with-sdk ON`) |
 
@@ -111,6 +113,18 @@ default dual-peripheral bridge) via
 
 [Complete Pico reading, B3 teleoperation, gripper and CLI guide](../docs/site/pico.md). Requires `--with-sdk ON --with-pico ON` and matching dual-arm SDK. Default packages exclude this executable.
 
+For dual-arm FDCC, add `--control-mode fdcc` without `--single-arm`:
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --robot-ip <dual-arm-cabinet-ip> --enable-motion --control-mode fdcc
+```
+
+Each Grip independently enters/exits its arm's FDCC. Targets use separate workers,
+up to 50 Hz per arm. Add `--no-gripper` if grippers are absent. See
+[dual-arm FDCC](../docs/site/pico.md#dual-arm-fdcc-teleoperation) for startup,
+recovery and exit behavior.
+
 ## Standalone i3: physical right Pico controller
 
 Pass `--single-arm` to connect one SDK `Single` instance. Only the physical
@@ -129,9 +143,13 @@ controls J6 while Grip is held. Release, stale input or right tracking loss
 brakes motion. Existing singularity slowdown, target preflight, state/fault
 checks and disable-on-exit remain active. ServoP is the default;
 `--control-mode fdcc` or `--control-mode impedance` selects single-arm FDCC
-or Cartesian impedance.
+or Cartesian impedance. FDCC and Cartesian impedance support both single and dual arms.
 The default mode remains dual-arm. The Python launcher forwards these same flags.
 
 See [FDCC usage](../docs/site/pico.md#single-arm-fdcc-teleoperation) and
 [Cartesian impedance usage](../docs/site/pico.md#single-arm-cartesian-impedance-teleoperation)
 for parameters and pause/exit behavior.
+
+## Keyboard
+
+[Single / simultaneous dual-arm control, keys and permissions](../docs/site/keyboard.md).

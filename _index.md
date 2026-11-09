@@ -33,6 +33,8 @@ GitHub `smore-robotics/smrcore_peripherals` 是源码真源。
 > FLOW: `*Options` 经 `Initialize()` 配置 → `Start()` 启后台线程 → `GetSample()` consume-on-read → 可选 SDK bridge 推送
 
 - teleop/: optional SDK-backed PICO core used by the independent C++ CLI; see `teleop/_index.md`.
+  FDCC supports B3 dual arms with independent Grip/workers and shared fault exit;
+  default ServoP and single-arm-only Cartesian impedance remain available.
 
 
 - Pico 读取保留在基础库；SMR_PERIPHERAL_WITH_PICO_TELEOP 默认 OFF，显式启用并依赖 SDK，配置阶段检查 standalone 双臂头文件。
@@ -63,3 +65,5 @@ GitHub `smore-robotics/smrcore_peripherals` 是源码真源。
 - docs/reviewed-release-notes.json: approved Codex summaries with immutable Git range and commit evidence.
 
 - User releases start at v0.1.0 capability baseline; maintainer guides live in docs/maintainers and are excluded from binary archives.
+
+- Keyboard: Linux terminal + local X11 held-key input, single/simultaneous dual-arm SDK bridge; see app/keyboard_control.md and docs/site/keyboard.md.

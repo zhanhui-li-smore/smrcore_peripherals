@@ -1,5 +1,6 @@
 {
   "unittests/__init__.py": "unittests/_index.md",
+  "unittests/test_pico_dual_fdcc.py": "unittests/_index.md",
   "unittests/test_pico_base_yaw.py": "unittests/_index.md",
   "unittests/test_pico_nonfinite.py": "unittests/_index.md",
   "unittests/test_pico_legacy_release.py": "unittests/_index.md",
@@ -173,5 +174,18 @@
   "teleop/pico_compliance.hpp": "teleop/pico_compliance.md",
   "teleop/pico_impedance.hpp": "teleop/pico_compliance.md",
   "unittests/test_pico_impedance.py": "unittests/_index.md",
-  "unittests/test_pico_fdcc_balance.py": "unittests/_index.md"
+  "unittests/test_pico_fdcc_balance.py": "unittests/_index.md",
+  "app/app_peripherals_keyboard_bridge.cpp": "app/keyboard_control.md",
+  "app/keyboard_control.hpp": "app/keyboard_control.md",
+  "app/keyboard_input.cpp": "app/keyboard_control.md",
+  "app/keyboard_input.hpp": "app/keyboard_control.md",
+  "unittests/test_keyboard_teleop.py": "unittests/_index.md",
+  "docs/site/keyboard.md": "docs/site/_index.md",
+  "docs/site/keyboard.zh.md": "docs/site/_index.md",
+  "unittests/test_keyboard_terminal.py": "unittests/_index.md",
+  "app/keyboard_channel.hpp": "app/keyboard_control.md",
+  "app/keyboard_desktop.hpp": "app/keyboard_control.md",
+  "app/keyboard_desktop.cpp": "app/keyboard_control.md",
+  "unittests/test_keyboard_held.py": "unittests/_index.md",
+  "docs/pico_teleop_quickstart.md": "docs/_index.md"
 }

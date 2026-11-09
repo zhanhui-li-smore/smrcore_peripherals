@@ -10,7 +10,7 @@
 
 <div class="smr-hero" markdown>
 
-**Integrate SpaceMouse, force/torque sensors, Pico and master–follower arms.**
+**Integrate SpaceMouse, force/torque sensors, Pico, master–follower arms and keyboards.**
 
 Build C++ and Python applications with the peripheral library, and connect robot applications through an optional Smartmore Robot SDK bridge.
 
@@ -46,5 +46,6 @@ Readers do not require a robot SDK. Default release packages do not include the 
 | [Force/torque sensor](ft-sensor.md) | Force and torque | SDK Peripheral sample API |
 | [Pico](pico.md) | Headset/controller poses and buttons | Dual-arm SDK ServoP and grippers |
 | [Master–follower arms](zhonglin.md) | Master joint positions | SDK ServoJ follower control |
+| [Keyboard](keyboard.md) | Terminal keyboard input | SDK ServoRelativeP / ServoJ, single / simultaneous dual arms |
 
 Each chain covers input reading, robot integration and configuration. Protocols and robot interfaces reflect the actual implementation.

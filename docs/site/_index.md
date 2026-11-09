@@ -1,5 +1,10 @@
 > DIR: docs/site/
 
+- pico.md/pico.zh.md: dual-arm FDCC startup, independent Grip/50Hz workers,
+  B3/operator mapping, per-arm pause/rearm and faults ending both arms.
+  SDK 0.2.0 versus RCore alpha.20261016 config-query incompatibility was
+  reproduced read-only; matching backend IDL restored both-arm config replies.
+
 - pico.md/pico.zh.md: 慢候选检查保留力控模式，冻结最后平衡点并自动续跟；
   区分检查完成时间和原始输入存活期，说明 IK/FK/等待耗时字段。
 
@@ -27,7 +32,7 @@
 
 - pico/python pages: bilingual Python launcher setup and unchanged C++ control semantics.
 
-- spacemouse/ft-sensor/pico/zhonglin: four peer device guides under Peripheral Integration; public name 主从臂 / Master–follower arms, hardware details only in scope.
+- spacemouse/ft-sensor/pico/zhonglin/keyboard: five peer device guides under Peripheral Integration; public name 主从臂 / Master–follower arms, hardware details only in scope.
 
 - downloads.md / downloads.zh.md: include canonical bilingual release guides instead of duplicating support claims.
 
@@ -45,3 +50,11 @@
   shaping flags, CST damping exit, DDS send diagnostics and motion-test scope.
   Impedance shares FDCC measured-Jacobian slowdown, omits the endpoint-condition
   veto and six FK calls; finite/IK/clearance/FK validation and expiry remain.
+
+- keyboard.md / keyboard.zh.md: Terminal keyboard, local X11 held-key continuous dual-arm input, Space toggle, Tab switch, focus pause and bounded --terminal fallback.
+
+- Single-arm impedance now defaults to the SDK SpaceMouse K/D profile; hold
+  restores the old soft profile. Docs distinguish shaping and following errors.
+
+- Dual impedance guide: mode 5 / 200Hz DDS per arm, shared SpaceMouse/hold K/D,
+  independent Grip/rearm, face-to-face mapping and pair fault shutdown.

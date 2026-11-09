@@ -17,11 +17,13 @@ namespace rcore {
 enum class TeleopInputSource { Manual, SpaceMouse };
 struct Errors { int count=0; int GetLatchedErrorCount() const { return count; } };
 struct RobotState {
+ std::array<double,6> positions{};
  double timestamp=1; int control_mode=0; bool cartesian_valid=true;
  std::string reference_frame="base"; Errors errors;
  std::array<double,3> cartesian_position{},cartesian_orientation{};
 };
 namespace sdk {
+using JointPositions = std::array<double,6>;
 struct Pose { std::array<double,3> t{},r{}; auto& tvec(){return t;} auto& rvec(){return r;} };
 struct Result {
  bool ok=true; bool IsSuccess()const{return ok;} int GetErrorCode()const{return ok?0:4339;}
@@ -31,15 +33,19 @@ struct FdCartesianAdmittanceParams {
  std::array<double,6> kp={.0005,.0005,.0005,.005,.005,.005};
  std::array<double,6> tracking_error_limit={.1,.1,.1,.1,.1,.1};
  double error_scale=1;
+ double damping_factor=.9;
 };
 struct Robot {
- std::atomic<int> mode{0},enabled{0},sent{0},exited{0},disabled{0},stops{0},manual{0},zero{0};
+ std::atomic<int> mode{0},enabled{0},sent{0},exited{0},disabled{0},stops{0},manual{0},zero{0},estops{0};
  std::atomic<bool> connected{true},freeze_stamp{false},fault{false},bad_tcp{false};
  std::atomic<bool> fail_enable{false},fail_pose{false},fail_exit{false};
  std::atomic<int> enable_delay_ms{0},pose_delay_ms{0},exit_delay_ms{0},reported_mode{-1};
  std::atomic<bool> in_pose{false};
  std::atomic<double> x{.3};
+ std::atomic<double> received_damping_factor{0};
+ std::atomic<double> received_error_scale{0};
  std::mutex mutex; std::vector<Pose> poses;
+ Result ForwardKinematics(const JointPositions& q, Pose& p){for(int i=0;i<3;++i){p.t[i]=q[i];p.r[i]=q[i+3];}return {};}
  Robot& Control(){return *this;} Robot& Motion(){return *this;}
  bool IsConnected(){return connected;}
  RobotState GetState(){
@@ -50,7 +56,9 @@ struct Robot {
   return s;
  }
  Result EnableFdCartesianAdmittance(FdCartesianAdmittanceParams p){
-  assert(p.kp[0]==.0005 && p.error_scale==1 && p.tracking_error_limit[0]==.1);
+  assert(p.kp[0]==.0005 && p.tracking_error_limit[0]==.1);
+  received_damping_factor=p.damping_factor;
+  received_error_scale=p.error_scale;
   ++enabled; std::this_thread::sleep_for(std::chrono::milliseconds(enable_delay_ms.load()));
   mode=6; return {!fail_enable}; // failure may follow successful server activation
  }
@@ -67,6 +75,7 @@ struct Robot {
   if(!fail_exit){mode=0;}return {!fail_exit};
  }
  Result Disable(){++disabled;return {};}
+ Result EStop(){++estops;mode=0;return {};}
  void StopMotion(){++stops;}
  // No ServoP, ServoJ or persistent force-source setter: using one fails to build.
 };
@@ -87,6 +96,52 @@ template<class F> void Until(F f){
 }
 void Submit(PicoFdcc& d,double x=1.){d.Submit(Target(x),Clock::now()+std::chrono::seconds(2));}
 int main(){
+ // Direct path bypasses shaping for XYZ/orientation, retaining stale hold/rearm.
+ {
+  rcore::sdk::Robot r; PicoFdcc d(r,.01,.05,1,0,.9,1,true);
+  d.UpdateInputDeadline(Clock::now()+std::chrono::seconds(2));
+  auto t=Target(.55);t.translation().y()=.12;
+  t.linear()=Eigen::AngleAxisd(.4,Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  auto expiry=Clock::now()+std::chrono::milliseconds(250);
+  d.Submit(t,expiry);
+  Until([&]{return d.Snapshot().phase==Phase::Active && d.Snapshot().sent>=2;});
+  {std::lock_guard<std::mutex> l(r.mutex);
+   assert(r.poses.front().t[0]==.3); // measured activation seed remains
+   assert(r.poses.back().t[0]==.55 && r.poses.back().t[1]==.12);
+   assert(std::abs(r.poses.back().r[2]-.4)<1e-10);}
+  assert(d.Snapshot().shape_gap_mm==0 && d.Snapshot().shape_gap_deg<1e-6);
+  Until([&]{return d.Snapshot().waiting_for_check;});
+  {std::lock_guard<std::mutex> l(r.mutex);assert(r.poses.back().t[0]==.55);}
+  assert(r.enabled==1 && r.mode==6);
+  d.Submit(Target(.6),Clock::now()+std::chrono::milliseconds(250));
+  Until([&]{return d.Snapshot().phase==Phase::Active && !d.Snapshot().waiting_for_check;});
+  {std::lock_guard<std::mutex> l(r.mutex);assert(r.poses.back().t[0]==.6);}
+  d.PauseUntilRelease("candidate rejected");
+  Until([&]{return d.Snapshot().phase==Phase::Holding;});
+  auto n=r.sent.load();Submit(d,.7);
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));assert(r.sent==n);
+  assert(d.Snapshot().rearm_required);d.Stop();
+ }
+ // Controller damping is propagated without changing other SDK parameters.
+ for(double factor:{.7,.5,1.,0.}){
+  rcore::sdk::Robot r;PicoFdcc d(r,.3,1.2,8,.0,factor);Submit(d);
+  Until([&]{return r.sent>0;});assert(r.received_damping_factor==factor);d.Stop();
+  assert(r.received_error_scale==1);
+ }
+ for(double scale:{.1,2.,4.}){
+  rcore::sdk::Robot r;PicoFdcc d(r,.3,1.2,8,.0,.8,scale);Submit(d);
+  Until([&]{return r.sent>0;});assert(r.received_error_scale==scale && r.received_damping_factor==.8);d.Stop();
+ }
+ for(double scale:{0.,-.1,4.1,std::nan(""),static_cast<double>(INFINITY)}){
+  rcore::sdk::Robot r;bool rejected=false;
+  try{PicoFdcc d(r,.3,1.2,8,.0,.8,scale);}catch(...){rejected=true;}
+  assert(rejected && r.enabled==0);
+ }
+ for(double factor:{-.01,1.01,std::nan(""),static_cast<double>(INFINITY)}){
+  rcore::sdk::Robot r;bool rejected=false;
+  try{PicoFdcc d(r,.3,1.2,8,.0,factor);}catch(...){rejected=true;}
+  assert(rejected && r.enabled==0);
+ }
  // First target starts at measured TCP. Release holds; re-grip reanchors.
  {
   rcore::sdk::Robot r; PicoFdcc d(r); Submit(d);
@@ -139,7 +194,7 @@ int main(){
   rcore::sdk::Robot r;r.fail_pose=!exit_failure;PicoFdcc d(r);Submit(d);
   if(exit_failure){Until([&]{return r.sent>0;});r.fail_exit=true;d.Pause();}
   Until([&]{return !d.Snapshot().error.empty();});d.Stop();
-  if(exit_failure){assert(r.disabled>0 && r.stops>0);}
+  if(exit_failure){assert(r.estops==1 && r.mode==0);}
  }
  // One in-flight RPC may complete after release; unsent replacements are canceled.
  {

@@ -18,7 +18,7 @@ class SingleHandStartupTest(unittest.TestCase):
 #include <iostream>
 #include <string>
 #include <thread>
-constexpr double kInputStaleSeconds = .25;
+constexpr double kInputStaleSeconds = .40;
 constexpr double kGripReleaseThreshold = .25;
 std::atomic<bool> running{true};
 std::atomic<bool>* session_running = &running;

@@ -45,6 +45,8 @@ The following enters real robot control. Verify read-only input, mounting, tool 
 ./build_Release/bin/app_peripherals_pico_bridge --enable-motion --robot-ip <robot-ip> --port 8765
 ```
 
+The table below describes default ServoP operation; see dual-arm FDCC below.
+
 | Input | Behavior |
 | --- | --- |
 | Hold Grip | Clutch and control the corresponding arm from pose increments |
@@ -65,7 +67,7 @@ The following enters real robot control. Verify read-only input, mounting, tool 
 | `--translation-only` | Off | Disable rotation mapping |
 | `--room-fixed` | Off | Room-fixed instead of head-yaw-clutched direction |
 | `--operator-frame` | same-side; also face-to-face | Operator direction |
-| `--control-mode` | servop; fdcc / impedance for single arm | Teleoperation control mode |
+| `--control-mode` | servop; fdcc/impedance for single or dual arms | Teleoperation control mode |
 | `--single-mapping-yaw` | 0° / −180° to 180°; single arm only | Rotate mapped increments around base Z; −90° is clockwise viewed from +Z toward the origin |
 | `--translation-scale` | 0.8 / 0.1–3.0 | Translation mapping |
 | `--rotation-scale` | 1.0 / 0.1–3.0 | Rotation mapping |
@@ -78,7 +80,9 @@ Arguments are processed in order; later options override earlier scale settings.
 
 ## Holds and recovery
 
-Approaching singularities uses quadratic slowdown between condition numbers 30 and 60; leaving uses doubled thresholds. A transient stale Jacobian freezes/brakes the affected arm. Pico input older than 250 ms freezes/brakes both arms and cancels unsent gripper commands; recovered input re-clutches from measured TCP. Stale robot state, controller faults and guard infrastructure failures terminate the session.
+This section describes default ServoP. FDCC release and rearm behavior is documented below.
+
+Approaching singularities uses quadratic slowdown between condition numbers 30 and 60; leaving uses doubled thresholds. A transient stale Jacobian freezes/brakes the affected arm. Pico input older than 400 ms freezes/brakes both arms and cancels unsent gripper commands; recovered input re-clutches from measured TCP. Stale robot state, controller faults and guard infrastructure failures terminate the session.
 
 Pending/rejected candidate checks hold the last approved target. J6 bypasses Cartesian singularity scaling but retains joint constraints. The Python launcher reuses this C++ bridge. Validate motion examples on the target robot configuration before deployment.
 
@@ -104,6 +108,87 @@ python3 python/app/app_peripherals_pico_bridge.py \
 Use `--bridge-executable /path/to/app_peripherals_pico_bridge` for an installed binary. Otherwise the launcher checks repository `build_Release/bin`, `build_Release/install/bin`, then PATH. Other arguments pass unchanged to the C++ parser; motion opt-in is never added automatically.
 The Python process is replaced by the bridge, preserving Ctrl+C handling and exit status without leaving an extra background motion process. Do not run the Pico reader on the same port simultaneously; use the Pico guide for headset connection steps.
 
+## Dual-arm FDCC teleoperation
+
+Add `--control-mode fdcc` to the dual-arm command, without `--single-arm`:
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --robot-ip <dual-arm-cabinet-ip> --enable-motion --control-mode fdcc
+```
+
+Both arms must start in kinematic hold (`mode=0`), with both controllers tracked
+and Grips released. Add `--no-gripper` if DH grippers are absent; by default,
+startup initializes and opens both grippers. The Python launcher forwards the
+same flags. ServoP remains the default control mode.
+
+- Each Grip independently enters its arm's FDCC, seeded from that arm's measured
+  TCP. Releasing one Grip exits that arm to hold while the other can keep following.
+- B3 mounting, head-yaw and operator mapping are preserved; `face-to-face` still
+  swaps hand-to-arm assignments. Triggers toggle the corresponding grippers;
+  J6 thumbstick motion is disabled in FDCC.
+- Each arm has its own worker with a **50 Hz** target-update ceiling. A slow RPC
+  on one arm does not serialize the other worker. This is not 1000 Hz ServoP.
+  Both arms share FDCC tuning options and preserve their own cabinet force source.
+  Zero target wrench does not guarantee zero contact force.
+- Tracking loss, stale Jacobian or rejected targets pause the affected arm and
+  require release/regrip. PICO stream loss pauses both with the same rearm rule.
+  Delayed checks instead freeze the last equilibrium and resume on fresh approval.
+- A controller fault, stale feedback, mode loss or RPC failure on either arm ends
+  the whole session. Ctrl+C cancels both streams before exiting FDCC, waiting for
+  standstill and requesting motor disable on each arm.
+
+Default translation target limits are 0.30 m/s and 1.2 m/s²; see
+[FDCC engineering details](#single-arm-fdcc-teleoperation) for tuning.
+`L FDCC` / `R FDCC` logs report each worker's state, send count, RPC duration,
+following error and rearm requirement.
+
+Compatibility: FDCC support does not guarantee SDK configuration compatibility.
+Against backend `0.2.1-alpha.20261016`, SDK `0.2.0` received state and force-source
+replies but stalled on `GetControllerConfig()` after controller-config fields
+changed. Rebuilding the SDK with the backend's IDL restored read-only config
+queries on both arms. If controller tracking is ready but SDK/reference setup
+stalls, check the SDK protocol version before changing PICO Wi-Fi settings.
+Startup logs distinguish initialization, command source, reference setup and enable.
+
+## Dual-arm Cartesian impedance teleoperation
+
+Omit `--single-arm` and select impedance:
+
+```bash
+./build_Release/bin/app_peripherals_pico_bridge \
+  --robot-ip 192.168.3.232 --enable-motion \
+  --control-mode impedance --operator-frame face-to-face
+```
+
+The local alpha.20261016-compatible build is
+`./build_dual_fdcc_1016/bin/app_peripherals_pico_bridge` with the same options.
+B3 mounting transforms and operator mapping are preserved. Face-to-face maps
+physical right hand to robot left arm, and physical left hand to robot right arm.
+Each arm owns its Grip, guard and worker, enters mode 5 and sends equilibrium
+poses over DDS at up to 200 Hz. The cabinet runs CST impedance; update rate is
+not measured motion bandwidth.
+
+Both arms share configured K/D and shaping limits. Defaults are the SpaceMouse
+profile: K=`400,400,400,30,30,30`, D=`30,30,30,2,2,2`, target speed 0.15 m/s,
+acceleration 0.6 m/s². `--impedance-profile hold` selects the original soft gains
+for both; explicit `--impedance-stiffness/damping` overrides are also supported.
+
+- Both arms must start in mode 0. Each first target is its own measured TCP.
+- Releasing one Grip requests that arm's damped exit; the other keeps following.
+- Tracking/Jacobian loss or candidate rejection pauses only the affected arm,
+  requiring fresh release/re-grip. Shared input loss pauses both.
+- Either arm's fault, SDK ownership loss or send failure ends the whole session.
+- Ctrl+C cancels both unsent streams before joining workers, then requests and
+  reads back motor disable on both arms. There is no ServoP/ServoJ fallback.
+- Trigger grippers remain available; use `--no-gripper` when absent. J6 thumbstick
+  and FDCC virtual extrapolation are disabled in impedance.
+
+Per-arm `shape_gap_mm`, `follow_err_mm`, `check` and `rearm` distinguish shaping,
+following and validation delays. Offline tests and compatible-SDK build passed;
+hardware CST transitions and tracking remain unverified. The cabinet must support
+the impedance APIs and have valid dynamics configuration.
+
 ## Standalone i3: physical right Pico controller
 
 Pass `--single-arm` to connect one SDK `Single` instance. Only the physical
@@ -127,7 +212,8 @@ controls J6 while Grip is held. Release, stale input or right tracking loss
 brakes motion. Existing singularity slowdown, target preflight, state/fault
 checks and disable-on-exit remain active. ServoP is the default;
 `--control-mode fdcc` or `--control-mode impedance` selects single-arm FDCC
-or Cartesian impedance.
+or Cartesian impedance. FDCC also supports dual-arm operation; Cartesian
+impedance also supports dual arms.
 The default mode remains dual-arm. The Python launcher forwards these same flags.
 
 ### Single-arm FDCC teleoperation
@@ -252,14 +338,19 @@ tracking resumes automatically after a new successful check.
 
 | Option | Default | Units / range |
 | --- | --- | --- |
-| `--impedance-stiffness` | `120,120,120,20,20,20` | XYZ: 0–2000 N/m; RX/RY/RZ: 0–150 N·m/rad |
-| `--impedance-damping` | `20,20,20,1,1,1` | XYZ: 0–200 N·s/m; RX/RY/RZ: 0–60 N·m·s/rad |
+| `--impedance-profile` | `spacemouse` | `spacemouse` teleop / original soft `hold` |
+| `--impedance-stiffness` | `400,400,400,30,30,30` | XYZ: 0–2000 N/m; RX/RY/RZ: 0–150 N·m/rad |
+| `--impedance-damping` | `30,30,30,2,2,2` | XYZ: 0–200 N·s/m; RX/RY/RZ: 0–60 N·m·s/rad |
 | `--impedance-max-speed` | `0.15` | 0.01–0.5 m/s, equilibrium target limit |
 | `--impedance-max-accel` | `0.6` | 0.05–2 m/s², equilibrium target limit |
 | `--impedance-follow-gain` | `8` | 1–40 /s, input shaping gain |
 
 K/D take exactly six comma-separated numbers in X/Y/Z/RX/RY/RZ order.
-Defaults use the SDK hold baseline. Other SDK defaults remain: task damping
+Defaults use the SDK SpaceMouse K/D profile, increasing restoring force and
+contact stiffness compared with hold. `--impedance-profile hold` restores
+K=`120,120,120,20,20,20`, D=`20,20,20,1,1,1`. Explicit K/D independently
+override the profile regardless of argument order. Profiles apply to single- and dual-arm
+impedance. Target limits remain 0.15 m/s and 0.6 m/s². Other SDK defaults: task damping
 on, position/orientation error saturation 0.03 m / 0.25 rad, zero feedforward
 wrench. Engineering bounds describe valid inputs, not a tuning envelope for
 every payload.
@@ -288,3 +379,9 @@ fault recovery or fallback position teleoperation.
 The entry builds against official SDK 0.2.0 and has offline lifecycle coverage.
 Hardware tracking, contact and CST transition behavior still require validation
 on the target cabinet. Update the executable and teleop shared library together.
+
+Startup prints resolved impedance K/D and shaping parameters. Large
+`shape_gap_mm` indicates input shaping lag; large `follow_err_mm` indicates actual
+TCP lag relative to the sent equilibrium; `check=WAIT` indicates expired target
+validation. Matching SpaceMouse gains does not make the whole chain identical
+or establish that the reported hardware tracking issue has been fixed.

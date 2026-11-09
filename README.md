@@ -3,7 +3,7 @@
   <img src="docs/site/assets/logo.png" alt="Smartmore Robotics" width="120">
 </p>
 <h1 align="center">smrcore_peripherals</h1>
-<p align="center"><strong>SpaceMouse、六维力传感器、Pico 和主从臂的外设接入库与机器人应用示例。</strong></p>
+<p align="center"><strong>SpaceMouse、六维力传感器、Pico、主从臂和键盘的外设接入库与机器人应用示例。</strong></p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License: Apache 2.0"></a>
   <a href="https://zhanhui-li-smore.github.io/smrcore_peripherals/zh/"><img src="https://img.shields.io/badge/Docs-online-brightgreen" alt="Documentation"></a>
@@ -25,6 +25,7 @@
 | [六维力传感器](docs/site/ft-sensor.md) | C++ / Python | SDK Peripheral 样本接口与标定 |
 | [Pico](docs/site/pico.md) | C++ / Python | 双臂 ServoP 与夹爪；Python 可启动同一 C++ 程序 |
 | [主从臂](docs/site/zhonglin.md) | Python | SDK ServoJ 从臂跟随 |
+| [键盘](docs/site/keyboard.md) | 终端键盘输入 | SDK ServoRelativeP / ServoJ，单臂 / 双臂同时控制 |
 
 ## 下载与文档
 

@@ -36,5 +36,6 @@ See the [complete Pico guide](pico.md) and [platform permissions](platform.md).
 | [Force/torque sensor](ft-sensor.md) | Force and torque | SDK Peripheral sample API |
 | [Pico](pico.md) | Headset/controller poses and buttons | Dual-arm SDK ServoP and grippers |
 | [Master–follower arms](zhonglin.md) | Master joint positions | SDK ServoJ follower control |
+| [Keyboard](keyboard.md) | Terminal keyboard input | SDK ServoRelativeP / ServoJ, single / simultaneous dual arms |
 
 Each chain covers input reading, robot integration and configuration. Protocols and robot interfaces reflect the actual implementation.

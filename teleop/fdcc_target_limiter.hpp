@@ -1,6 +1,7 @@
 #pragma once
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 
@@ -17,6 +18,35 @@ inline bool ValidFdccShaping(double speed, double accel, double gain, double sca
            std::isfinite(accel) && accel >= 0.05 && accel <= 2.0 &&
            std::isfinite(gain) && gain >= 1.0 && gain <= 40.0 &&
            std::isfinite(scale) && scale >= 1.0 && scale <= 3.0;
+}
+
+// Synchronised joint-reference step. Never accumulate a long scheduling gap.
+inline std::array<double, 6> LimitJointTargetStep(
+    const std::array<double, 6> &previous, const std::array<double, 6> &wanted,
+    double dt, double max_speed_rad_s)
+{
+    if (!std::isfinite(dt) || dt < 0.0 || !std::isfinite(max_speed_rad_s) || max_speed_rad_s <= 0.0)
+    {
+        throw std::runtime_error("invalid joint target speed/dt");
+    }
+    double peak = 0.0;
+    for (size_t i = 0; i < previous.size(); ++i)
+    {
+        if (!std::isfinite(previous[i]) || !std::isfinite(wanted[i]) ||
+            !std::isfinite(wanted[i] - previous[i]))
+        {
+            throw std::runtime_error("nonfinite joint target");
+        }
+        peak = std::max(peak, std::abs(wanted[i] - previous[i]));
+    }
+    const double allowed = max_speed_rad_s * std::min(dt, 0.02);
+    const double scale = peak > allowed ? allowed / peak : 1.0;
+    auto result = previous;
+    for (size_t i = 0; i < result.size(); ++i)
+    {
+        result[i] += scale * (wanted[i] - previous[i]);
+    }
+    return result;
 }
 
 // Compute before IK/FK validation. Preserve orientation and the raw clutch

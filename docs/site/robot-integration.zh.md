@@ -47,5 +47,6 @@ Pico 读取器属于基础库；Pico 双臂遥操属于独立的可选 C++ 程�
 | [六维力传感器](ft-sensor.md) | 力与力矩采样 | SDK Peripheral 样本接口 |
 | [Pico](pico.md) | 头显、手柄位姿与按键 | 双臂 SDK ServoP 与末端夹爪 |
 | [主从臂](zhonglin.md) | 主臂关节位置 | SDK ServoJ 从臂跟随 |
+| [键盘](keyboard.md) | 终端键盘输入 | SDK ServoRelativeP / ServoJ，单臂 / 双臂同时控制 |
 
 统一按“读取输入 → 机器人接入 → 配置与适用范围”使用；各链路的协议和控制接口按实际实现说明。

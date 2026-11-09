@@ -29,6 +29,7 @@
 | `app_peripherals_read_ft_sensor` | 串口六维力矩流，含 `WaitForFirstSample` 与完整串口 CLI |
 | `app_peripherals_read_pico` | PICO WebXR 头显/双手柄读数，不连接机器人 |
 | `app_peripherals_bridge` | 通过 `robot.Peripheral().Update*Sample()` 推送 SpaceMouse 和/或 F/T 数据（需 `--with-sdk ON`） |
+| `app_peripherals_keyboard_bridge` | 终端键盘笛卡尔 / 关节遥操，单臂 / 双臂同时控制（`--with-sdk ON`） |
 | `app_peripherals_ft_sensor_calib` | MoveJ 静态六维力标定（需 `--with-sdk ON`；先跑 bridge 注入 raw） |
 | `app_peripherals_pico_bridge` | PICO 双手柄到双臂 SDK ServoP；按住 Grip 后 thumbstick Y 轴直接控制对应手臂 J6（ServoJ，默认 `0.8 rad/s`，可用 `--j6-speed` 调整）；Trigger 按 0/1 映射左右夹爪开/关；需 `--with-sdk ON --with-pico ON` 和兼容双臂 SDK |
 
@@ -106,3 +107,7 @@ SpaceMouse 遥操同样**不会**由 SDK 示例直接打开 `/dev/input/*`，必
 ## Pico
 
 [Pico 读取与双臂遥操完整说明](pico.md)。
+
+## 键盘
+
+[单臂 / 双臂同时控制、按键及权限说明](keyboard.md)。

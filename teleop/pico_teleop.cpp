@@ -68,10 +68,9 @@ constexpr double kDefaultRotationScale = 1.00;
 constexpr double kDefaultJ6ThumbstickSpeedRadiansPerSecond = 0.80;
 constexpr double kMinimumMappingScale = 0.10;
 constexpr double kMaximumMappingScale = 3.00;
-// WebXR over adb reverse can hitch past 100ms; freeze+require_release at
-// 100ms looks like "PICO moves, arm does not" until the user fully releases
-// Grip. 250ms still stops a dropped stream without latching the clutch.
-constexpr double kInputStaleSeconds = 0.25;
+// Allow up to 400ms of PICO receive jitter. Compliance still requires Grip
+// release after input expiry; robot/Jacobian/target freshness is independent.
+constexpr double kInputStaleSeconds = 0.40;
 constexpr double kRobotStateStaleSeconds = 0.25;
 constexpr double kGripPressThreshold = 0.90;
 constexpr double kGripReleaseThreshold = 0.75;
@@ -1173,7 +1172,31 @@ private:
         if (!smrcore::peripherals::GuardJointCandidate(state.positions,
                                                        c.joints))
         {
-            c.blocked_reason = "candidate elbow/wrist clearance";
+            // Capture the rejected candidate here, before Pause/FreezeHand
+            // replaces the mapping target with measured TCP. Current-pose IK
+            // after a pause cannot reconstruct this decision.
+            constexpr double pi = 3.14159265358979323846;
+            constexpr double clearance_sine = 0.173648177667;
+            std::ostringstream reason;
+            reason << std::fixed << std::setprecision(3)
+                   << "candidate elbow/wrist clearance"
+                   << " sequence=" << c.trace_sequence
+                   << " state_time=" << state.timestamp;
+            for (size_t i : {size_t{2}, size_t{4}})
+            {
+                const double actual = state.positions[i];
+                const double candidate = c.joints[i];
+                reason << " J" << i + 1
+                       << "{actual_deg=" << actual * 180.0 / pi
+                       << ",ik_deg=" << candidate * 180.0 / pi
+                       << ",actual_near=" << (std::abs(std::sin(actual)) < clearance_sine)
+                       << ",ik_near=" << (std::abs(std::sin(candidate)) < clearance_sine)
+                       << ",cross=" << (std::sin(actual) * std::sin(candidate) <= 0.0)
+                       << '}';
+            }
+            reason << " target_xyz_m=[" << c.target.translation().transpose()
+                   << "] target_rpy_rad=[" << c.rpy.transpose() << ']';
+            c.blocked_reason = reason.str();
             c.ready = true;
             return;
         }
@@ -2152,6 +2175,17 @@ int RunSingleRightSession(const Options &options,
               << "PICO: http://127.0.0.1:" << options.port << "\n"
               << "adb reverse tcp:" << options.port << " tcp:" << options.port
               << "\n按住右 Grip 跟随；松开制动。左手柄不参与控制。\n";
+    if (use_impedance)
+    {
+        std::cout << "阻抗 K [XYZ N/m, RPY Nm/rad]:";
+        for (double value : options.impedance_stiffness) { std::cout << ' ' << value; }
+        std::cout << "\n阻抗 D [XYZ Ns/m, RPY Nms/rad]:";
+        for (double value : options.impedance_damping) { std::cout << ' ' << value; }
+        std::cout << "\n平衡点整形 speed=" << options.impedance_max_speed
+                  << " m/s, accel=" << options.impedance_max_accel
+                  << " m/s2, gain=" << options.impedance_follow_gain
+                  << " /s；shape=目标整形误差，follow=平衡点到实测 TCP 误差。\n";
+    }
     PicoSample packet;
     if (!WaitForControllers(pico, packet, true) ||
         !WaitForReleasedGrips(pico, true))
@@ -2230,7 +2264,7 @@ int RunSingleRightSession(const Options &options,
             // force source. The backend validates its readiness at activation.
             const auto source = robot.Control().GetFdCartesianAdmittanceWrenchSource();
             std::cout << "FDCC force_source=" << static_cast<int>(source)
-                      << "（沿用柜子配置）；SDK 默认参数，tracking_error_limit=0.1rad\n"
+                      << "（沿用柜子配置）；SDK 仅覆盖 damping_factor/error_scale，tracking_error_limit=0.1rad\n"
                       << "FDCC 平移目标上限: " << options.fdcc_max_speed << "m/s, "
                       << options.fdcc_max_accel << "m/s2；入口跟随增益=" << options.fdcc_follow_gain
                       << "/s；虚拟目标倍数=" << options.fdcc_target_scale << '\n'
@@ -2259,12 +2293,13 @@ int RunSingleRightSession(const Options &options,
     {
         compliance = std::make_unique<PicoImpedance>(robot, options.impedance_stiffness,
             options.impedance_damping, options.impedance_max_speed,
-            options.impedance_max_accel, options.impedance_follow_gain);
+            options.impedance_max_accel, options.impedance_follow_gain, options.impedance_direct_target, options.impedance_joint_max_speed_deg);
     }
     else if (use_compliance)
     {
         compliance = std::make_unique<PicoFdcc>(robot, options.fdcc_max_speed,
-            options.fdcc_max_accel, options.fdcc_follow_gain, options.fdcc_target_feedforward);
+            options.fdcc_max_accel, options.fdcc_follow_gain, options.fdcc_target_feedforward,
+            options.fdcc_damping_factor, options.fdcc_error_scale, options.fdcc_direct_target);
     }
     EndBoardDhGripper gripper(robot, "单臂夹爪");
     if (options.enable_gripper &&
@@ -2402,7 +2437,7 @@ int RunSingleRightSession(const Options &options,
             {
                 const char *reason = !input_connected ? "Pico WebSocket disconnected" :
                     !packet.right.tracked ? "Pico right-hand tracking lost" :
-                    !fresh ? "Pico sample age exceeded 250ms" :
+                    !fresh ? "Pico sample age exceeded 400ms" :
                     !singularity.fresh ? "Jacobian stale" : "Grip released / clutch stopped";
                 std::cout << mode_name << " pause reason: " << reason;
                 print_input_health();
@@ -2480,7 +2515,7 @@ int RunSingleRightSession(const Options &options,
                 {
                     const auto valid_until = PicoCompliance::Clock::time_point(
                         std::chrono::nanoseconds(checked.completed_ns)) + std::chrono::milliseconds(200);
-                    compliance->Submit(approved.target_tcp_reference, valid_until, checked.raw_target);
+                    compliance->Submit(approved.target_tcp_reference, valid_until, checked.raw_target, checked.joints);
                 }
                 else
                 {
@@ -2588,11 +2623,165 @@ int RunSingleRightSession(const Options &options,
     return fault ? 1 : 0;
 }
 
+// Cancel both streams before joining either worker, including exception unwind.
+// Each arm owns its own mode transition and latest-target slot.
+class DualPicoCompliance
+{
+private:
+    static std::unique_ptr<PicoCompliance> MakeWorker(rcore::sdk::Robot &robot,
+                                                     const Options &options)
+    {
+        if (options.control_mode == PicoControlMode::CartesianImpedance)
+        {
+            return std::make_unique<PicoImpedance>(robot, options.impedance_stiffness,
+                options.impedance_damping, options.impedance_max_speed,
+                options.impedance_max_accel, options.impedance_follow_gain, options.impedance_direct_target, options.impedance_joint_max_speed_deg);
+        }
+        if (options.control_mode == PicoControlMode::Fdcc)
+        {
+            return std::make_unique<PicoFdcc>(robot, options.fdcc_max_speed,
+                options.fdcc_max_accel, options.fdcc_follow_gain, options.fdcc_target_feedforward,
+                options.fdcc_damping_factor, options.fdcc_error_scale, options.fdcc_direct_target);
+        }
+        throw std::runtime_error("Dual compliance requires FDCC or impedance");
+    }
+    // Own both workers before exposing references; partial construction cleans up
+    // an idle first worker if constructing the second one fails.
+    std::unique_ptr<PicoCompliance> left_worker_, right_worker_;
+public:
+    DualPicoCompliance(rcore::sdk::Robot &left_robot, rcore::sdk::Robot &right_robot,
+                       const Options &options)
+        : left_worker_(MakeWorker(left_robot, options)),
+          right_worker_(MakeWorker(right_robot, options)),
+          left(*left_worker_), right(*right_worker_) {}
+    DualPicoCompliance(const DualPicoCompliance &) = delete;
+    DualPicoCompliance &operator=(const DualPicoCompliance &) = delete;
+    ~DualPicoCompliance() { Stop(); }
+    void Pause()
+    {
+        left.Pause();
+        right.Pause();
+    }
+    bool Healthy()
+    {
+        const auto l = left.Snapshot();
+        const auto r = right.Snapshot();
+        if (!l.error.empty() || !r.error.empty())
+        {
+            Pause();
+            std::cerr << "Dual compliance failed: L=" << l.error << " R=" << r.error << '\n';
+            return false;
+        }
+        return true;
+    }
+    void Stop()
+    {
+        Pause();
+        left.Stop();
+        right.Stop();
+    }
+    PicoCompliance &left, &right;
+};
+
+bool TickDualComplianceArm(const Options &options, const PicoSample &packet,
+                     const PicoControllerPose &controller, bool packet_fresh,
+                     bool new_packet, const rcore::RobotState &state,
+                     const ArmReference &reference,
+                     const SingularitySlowdownStatus &singularity,
+                     HandServoState &hand, PicoTargetGuard &guard,
+                     PicoCompliance &worker)
+{
+    const auto status = worker.Snapshot();
+    if (!status.error.empty())
+    {
+        return false;
+    }
+    const bool fresh = packet_fresh && controller.present && controller.tracked;
+    if (!fresh || !singularity.fresh)
+    {
+        guard.Cancel();
+        worker.PauseUntilRelease(!fresh ? "Pico input/tracking lost" : "Jacobian stale");
+        FreezeHand(state, hand, true);
+        hand.stop_requested = false;
+        return true;
+    }
+    if (status.rearm_required)
+    {
+        guard.Cancel();
+        FreezeHand(state, hand, true);
+        hand.stop_requested = false;
+        if (controller.grip > kGripReleaseThreshold || !worker.AcknowledgeGripRelease())
+        {
+            return true;
+        }
+        hand.require_release = false;
+    }
+    if (status.phase == PicoCompliance::Phase::Stopping)
+    {
+        guard.Cancel();
+        FreezeHand(state, hand, false);
+        hand.stop_requested = false;
+        return true;
+    }
+    if (new_packet)
+    {
+        auto pose = controller;
+        pose.thumbstick = {0.0, 0.0}; // Compliance never falls back to J6 ServoJ.
+        UpdateHandTarget(pose, packet.headset, state, reference,
+                         options.enable_rotation, options.head_yaw_clutched,
+                         options.translation_scale, options.rotation_scale, 0.0,
+                         options.operator_facing_robot, singularity, hand);
+    }
+    if (hand.stop_requested || !hand.active || !hand.servop_stream_started)
+    {
+        guard.Cancel();
+        worker.Pause();
+        FreezeHand(state, hand, false);
+        hand.stop_requested = false;
+        return true;
+    }
+    worker.UpdateInputDeadline(PicoCompliance::Clock::time_point(
+        std::chrono::duration_cast<PicoCompliance::Clock::duration>(
+            std::chrono::duration<double>(packet.timestamp_sec + kInputStaleSeconds))));
+    Eigen::Isometry3d measured;
+    if (!GetTcpInReference(state, measured))
+    {
+        return false;
+    }
+    auto candidate = hand;
+    candidate.target_tcp_reference = smrcore::peripherals::detail::MakeFdccVirtualTarget(
+        hand.target_tcp_reference, measured,
+        options.control_mode == PicoControlMode::CartesianImpedance ? 1.0 : options.fdcc_target_scale);
+    guard.Submit(candidate, &hand.target_tcp_reference);
+    const auto checked = guard.Snapshot();
+    if (!checked.error.empty())
+    {
+        std::cerr << "Compliance target check failed: " << checked.error << '\n';
+        return false;
+    }
+    if (!checked.blocked_reason.empty())
+    {
+        worker.PauseUntilRelease(checked.blocked_reason);
+        guard.Cancel();
+        FreezeHand(state, hand, true);
+        hand.stop_requested = false;
+    }
+    else if (checked.ready && !checked.pending)
+    {
+        worker.Submit(checked.target, PicoCompliance::Clock::time_point(
+            std::chrono::nanoseconds(checked.completed_ns)) + std::chrono::milliseconds(200),
+            checked.raw_target, checked.joints);
+    }
+    return true;
+}
+
 int RunSession(const Options &options,
                std::array<std::atomic<double>, 16> &diagnostics)
 {
     const Options defaults;
-    if (!smrcore::peripherals::detail::ValidTargetFeedforward(options.fdcc_target_feedforward) ||
+    if (!smrcore::peripherals::detail::ValidFdccDampingFactor(options.fdcc_damping_factor) ||
+        !smrcore::peripherals::detail::ValidFdccErrorScale(options.fdcc_error_scale) ||
+        !smrcore::peripherals::detail::ValidTargetFeedforward(options.fdcc_target_feedforward) ||
         !smrcore::peripherals::detail::ValidFdccShaping(options.fdcc_max_speed,
             options.fdcc_max_accel, options.fdcc_follow_gain, options.fdcc_target_scale) ||
         (options.control_mode != PicoControlMode::Fdcc &&
@@ -2600,14 +2789,21 @@ int RunSession(const Options &options,
           options.fdcc_max_accel != defaults.fdcc_max_accel ||
           options.fdcc_follow_gain != defaults.fdcc_follow_gain ||
           options.fdcc_target_scale != defaults.fdcc_target_scale ||
-          options.fdcc_target_feedforward != defaults.fdcc_target_feedforward)))
+          options.fdcc_target_feedforward != defaults.fdcc_target_feedforward ||
+          options.fdcc_damping_factor != defaults.fdcc_damping_factor ||
+          options.fdcc_error_scale != defaults.fdcc_error_scale || options.fdcc_direct_target)) ||
+        (options.fdcc_direct_target && options.fdcc_target_scale != 1.0))
     {
         std::cerr << "FDCC 参数仅用于 --control-mode fdcc：speed [0.01,0.5]m/s, "
                      "accel [0.05,2]m/s2, follow_gain [1,40]/s, target_scale [1,3], "
-                     "target_feedforward [0,1]\n";
+                     "target_feedforward [0,1], damping_factor [0,1], error_scale [0.1,4]; direct-target requires target_scale=1\n";
         return 2;
     }
-    if (!smrcore::peripherals::detail::ValidImpedanceGains(options.impedance_stiffness,
+    if (!std::isfinite(options.impedance_joint_max_speed_deg) ||
+        options.impedance_joint_max_speed_deg < 0.0 || options.impedance_joint_max_speed_deg > 180.0 ||
+        (options.impedance_joint_max_speed_deg > 0.0 &&
+         (options.control_mode != PicoControlMode::CartesianImpedance || options.impedance_direct_target)) ||
+        !smrcore::peripherals::detail::ValidImpedanceGains(options.impedance_stiffness,
             options.impedance_damping) ||
         !smrcore::peripherals::detail::ValidFdccShaping(options.impedance_max_speed,
             options.impedance_max_accel, options.impedance_follow_gain, 1.0) ||
@@ -2616,17 +2812,16 @@ int RunSession(const Options &options,
           options.impedance_damping != defaults.impedance_damping ||
           options.impedance_max_speed != defaults.impedance_max_speed ||
           options.impedance_max_accel != defaults.impedance_max_accel ||
-          options.impedance_follow_gain != defaults.impedance_follow_gain)))
+          options.impedance_follow_gain != defaults.impedance_follow_gain || options.impedance_direct_target)))
     {
         std::cerr << "阻抗参数仅用于 --control-mode impedance；K/D 与速度参数须在帮助所示范围内\n";
         return 2;
     }
     if ((options.control_mode != PicoControlMode::ServoP &&
          options.control_mode != PicoControlMode::Fdcc &&
-         options.control_mode != PicoControlMode::CartesianImpedance) ||
-        (options.control_mode != PicoControlMode::ServoP && !options.single_arm))
+         options.control_mode != PicoControlMode::CartesianImpedance))
     {
-        std::cerr << "--control-mode fdcc/impedance 目前仅支持 --single-arm 独立单臂\n";
+        std::cerr << "control-mode 须为 servop/fdcc/impedance\n";
         return 2;
     }
     if (!std::isfinite(options.single_mapping_yaw_deg) ||
@@ -2658,9 +2853,40 @@ int RunSession(const Options &options,
 
     if (options.single_arm)
     {
+        if (options.control_mode == PicoControlMode::Fdcc)
+        {
+            std::cout << "FDCC controller damping_factor=" << options.fdcc_damping_factor
+                      << " target_mode=" << (options.fdcc_direct_target ? "DIRECT (host shaping bypassed)" : "SHAPED")
+                      << " error_scale=" << options.fdcc_error_scale
+                      << " (virtual velocity retention; lower means stronger decay)" << std::endl;
+        }
         return RunSingleRightSession(options, diagnostics);
     }
+    const bool use_fdcc = options.control_mode == PicoControlMode::Fdcc;
+    const bool use_impedance = options.control_mode == PicoControlMode::CartesianImpedance;
+    const bool use_compliance = use_fdcc || use_impedance;
+    const char *compliance_name = use_impedance ? "Impedance" : "FDCC";
 
+    if (use_fdcc)
+    {
+        std::cout << "FDCC controller damping_factor=" << options.fdcc_damping_factor
+                  << " target_mode=" << (options.fdcc_direct_target ? "DIRECT (host shaping bypassed)" : "SHAPED")
+                      << " error_scale=" << options.fdcc_error_scale
+                  << " (virtual velocity retention; lower means stronger decay)" << std::endl;
+    }
+
+    if (use_impedance)
+    {
+        std::cout << "双臂阻抗：两臂各自 200Hz DDS 平衡点更新；共享 K/D 配置。\nK:";
+        for (double value : options.impedance_stiffness) { std::cout << ' ' << value; }
+        std::cout << "\nD:";
+        for (double value : options.impedance_damping) { std::cout << ' ' << value; }
+        std::cout << "\n阻抗目标模式=" << (options.impedance_joint_max_speed_deg > 0.0 ? "JOINT-LIMITED" : (options.impedance_direct_target ? "DIRECT (host shaping bypassed)" : "SHAPED"));
+        std::cout << " joint_max_speed=" << options.impedance_joint_max_speed_deg << " deg/s";
+        std::cout << "\n平衡点整形参数（仅 SHAPED 生效） speed=" << options.impedance_max_speed
+                  << " m/s, accel=" << options.impedance_max_accel
+                  << " m/s2, gain=" << options.impedance_follow_gain << " /s\n";
+    }
     Eigen::Isometry3d world_from_left_base = Eigen::Isometry3d::Identity();
     Eigen::Isometry3d world_from_right_base = Eigen::Isometry3d::Identity();
     LoadEmbeddedMountTransforms(world_from_left_base, world_from_right_base);
@@ -2681,7 +2907,7 @@ int RunSession(const Options &options,
               << "PC 服务: http://127.0.0.1:" << options.port << "/\n"
               << "USB 映射: adb reverse tcp:" << options.port
               << " tcp:" << options.port << "\n"
-              << "模式: SDK ServoP"
+              << "模式: SDK " << (use_impedance ? "双臂 Impedance (CST)" : use_fdcc ? "双臂 FDCC" : "ServoP")
               << "\n映射: 平移 " << options.translation_scale << "x，旋转 "
               << (options.enable_rotation
                       ? std::to_string(options.rotation_scale) + "x"
@@ -2689,7 +2915,7 @@ int RunSession(const Options &options,
               << "\n方向基准: "
               << (options.head_yaw_clutched ? "Grip 锁定头显 yaw"
                                             : "WebXR room-fixed")
-              << "\nJ6 推杆: 已启用；最大速度 " << options.j6_thumbstick_speed
+              << "\nJ6 推杆: " << (use_compliance ? "柔顺模式禁用；配置速度 " : "已启用；最大速度 ") << options.j6_thumbstick_speed
               << " rad/s，死区 " << kJ6ThumbstickDeadzone << "\n操作者坐标系: "
               << (options.operator_facing_robot ? "face-to-face" : "same-side")
               << std::endl;
@@ -2699,7 +2925,7 @@ int RunSession(const Options &options,
                   << std::endl;
     }
     std::cout << "必须按住 Grip≥" << std::fixed << std::setprecision(2)
-              << kGripPressThreshold << " 才会发 ServoP；松开到 ≤"
+              << kGripPressThreshold << " 才会跟随；松开到 ≤"
               << kGripReleaseThreshold
               << " 冻结。Trigger 按下沿切换 DH 夹爪开/关。"
                  "终端 clutch=OFF 时手柄移动不会带动机械臂。"
@@ -2719,23 +2945,49 @@ int RunSession(const Options &options,
     }
 
     rcore::sdk::DualArmRobot arms;
+    std::cout << "正在初始化双臂 SDK 连接..." << std::endl;
     if (!arms.Initialize(options.robot_ip))
     {
         std::cerr << "DualArmRobot 初始化失败" << std::endl;
         pico.Stop();
         return 1;
     }
-
-    std::string command_source_error;
-    if (!EnsureSdkCommandSource(arms.left_robot(), "L", command_source_error) ||
-        !EnsureSdkCommandSource(arms.right_robot(), "R", command_source_error))
+    if (!session_running->load())
     {
-        std::cerr << command_source_error << std::endl;
         arms.Shutdown();
         pico.Stop();
-        return 1;
+        return 0;
     }
 
+    std::string command_source_error;
+    const auto claim_source = [&](rcore::sdk::Robot &robot, const char *arm)
+    {
+        if (!session_running->load())
+        {
+            return false;
+        }
+        std::cout << arm << " SDK 已连接，正在检查/获取命令源..." << std::endl;
+        return EnsureSdkCommandSource(robot, arm, command_source_error);
+    };
+    if (!claim_source(arms.left_robot(), "L") ||
+        !claim_source(arms.right_robot(), "R"))
+    {
+        if (!command_source_error.empty())
+        {
+            std::cerr << command_source_error << std::endl;
+        }
+        arms.Shutdown();
+        pico.Stop();
+        return session_running->load() ? 1 : 0;
+    }
+
+    if (!session_running->load())
+    {
+        arms.Shutdown();
+        pico.Stop();
+        return 0;
+    }
+    std::cout << "双臂 SDK 命令源已就绪，正在解析 base 参考系..." << std::endl;
     ArmReference left_reference;
     ArmReference right_reference;
     std::string reference_error;
@@ -2760,7 +3012,7 @@ int RunSession(const Options &options,
             << "] |R-I|=" << rot_from_i;
         return oss.str();
     };
-    std::cout << "遥操方向: smorebot world 映射，ServoP 使用各臂 base 参考系。"
+    std::cout << "遥操方向: smorebot world 映射，目标使用各臂 base 参考系。"
               << std::endl;
     std::cout << "世界系 L: " << describe_world_ref(left_reference)
               << std::endl;
@@ -2801,12 +3053,37 @@ int RunSession(const Options &options,
         return 0;
     }
     SelectedPicoStopper left_stopper, right_stopper;
-    if (!left_stopper.Configure(arms.left_robot()) ||
-        !right_stopper.Configure(arms.right_robot()))
+    if (!use_compliance && (!left_stopper.Configure(arms.left_robot()) ||
+        !right_stopper.Configure(arms.right_robot())))
     {
         std::cerr << "无法读取有效的关节制动限制，拒绝启动 PICO 遥操。\n";
         return 1;
     }
+    if (use_compliance)
+    {
+        if (static_cast<int>(arms.left_robot().GetState().control_mode) != 0 ||
+            static_cast<int>(arms.right_robot().GetState().control_mode) != 0)
+        {
+            std::cerr << "双臂柔顺控制需两臂均从运动学持位模式启动（mode=0）\n";
+            return 1;
+        }
+    }
+    if (use_fdcc)
+    {
+        const auto left_source = arms.left_robot().Control().GetFdCartesianAdmittanceWrenchSource();
+        const auto right_source = arms.right_robot().Control().GetFdCartesianAdmittanceWrenchSource();
+        std::cout << "FDCC force_source L=" << static_cast<int>(left_source)
+                  << " R=" << static_cast<int>(right_source)
+                  << "（沿用各臂配置）；SDK 参数仅覆盖 damping_factor/error_scale、零目标 wrench；每臂最高 50Hz RPC\n";
+    }
+    if (!session_running->load())
+    {
+        cleanup.armed = false;
+        arms.Shutdown();
+        pico.Stop();
+        return 0;
+    }
+    std::cout << "双臂连接预检完成，正在使能..." << std::endl;
     auto enable_result = arms.Enable();
     if (!enable_result.Ok())
     {
@@ -2860,7 +3137,7 @@ int RunSession(const Options &options,
         !right_singularity_monitor.WaitForInitialSample(
             std::chrono::seconds(1)))
     {
-        std::cerr << "1s 内未取得双臂 Jacobian，拒绝启动 PICO ServoP。"
+        std::cerr << "1s 内未取得双臂 Jacobian，拒绝启动 PICO 遥操。"
                   << std::endl;
         left_singularity_monitor.Stop();
         right_singularity_monitor.Stop();
@@ -2873,11 +3150,11 @@ int RunSession(const Options &options,
         return 1;
     }
 
-    std::cout
-        << "PICO guarded ServoP: condition 30..60 slowdown; "
+    std::cout << (use_compliance ?
+        "PICO dual compliance: independent Grip/worker per arm; J6 disabled; faults stop both arms." :
+        "PICO guarded ServoP: condition 30..60 slowdown; "
            "candidate IK/FK preflight; J6 thumbstick enabled; faults stop "
-           "both arms."
-        << std::endl;
+           "both arms.") << std::endl;
 
     RobotStateFreshnessWatchdog left_state_watchdog;
     RobotStateFreshnessWatchdog right_state_watchdog;
@@ -2895,11 +3172,17 @@ int RunSession(const Options &options,
     bool right_singularity_was_fresh = true;
     bool safety_fault_detected = false;
     bool pico_guard_fault = false;
-    std::cout << "PICO GUARD: condition soft=30 hard=60, target preflight, "
-                 "elbow/wrist clearance>=10deg; IK continuity by backend "
-                 "ServoP; J6 thumbstick enabled; fault requires restart\n";
-    PicoTargetGuard left_guard(arms.left_robot());
-    PicoTargetGuard right_guard(arms.right_robot());
+    std::cout << "PICO GUARD: measured singularity slowdown, target IK/FK preflight, "
+                 "elbow/wrist clearance>=10deg; fault requires restart\n";
+    PicoTargetGuard left_guard(arms.left_robot(),
+        PicoTargetGuard::PolicyForControlMode(options.control_mode));
+    PicoTargetGuard right_guard(arms.right_robot(),
+        PicoTargetGuard::PolicyForControlMode(options.control_mode));
+    std::unique_ptr<DualPicoCompliance> compliance;
+    if (use_compliance)
+    {
+        compliance = std::make_unique<DualPicoCompliance>(arms.left_robot(), arms.right_robot(), options);
+    }
     PicoLatencyTrace latency_trace;
     std::array<double, 2> trace_feedback_stamp{}, trace_feedback_seen{};
     PicoSample packet = first_packet;
@@ -2914,14 +3197,48 @@ int RunSession(const Options &options,
     bool left_gripper_closed = false;
     bool right_gripper_closed = false;
 
+    // Observe input clocks independently; headset and host absolute times
+    // are not synchronized. GetSample is a latest-slot consumer, so sequence
+    // jumps describe skipped observations, not proven network packet loss.
+    auto last_input_loop = std::chrono::steady_clock::now();
+    double previous_receive_sec = packet.timestamp_sec;
+    double previous_headset_ms = packet.headset_timestamp_ms;
+    uint64_t previous_input_sequence = packet.sequence;
+    double max_loop_gap_ms = 0.0, max_receive_gap_ms = 0.0;
+    double max_headset_gap_ms = 0.0, max_input_age_ms = 0.0;
+    uint64_t max_sequence_step = 0;
+    bool left_rearm_logged = false, right_rearm_logged = false;
+
     while (session_running->load(std::memory_order_acquire))
     {
+        const auto input_loop_now = std::chrono::steady_clock::now();
+        const double input_loop_gap_ms = std::chrono::duration<double, std::milli>(
+            input_loop_now - last_input_loop).count();
+        last_input_loop = input_loop_now;
+        max_loop_gap_ms = std::max(max_loop_gap_ms, input_loop_gap_ms);
         (void)TakePicoSample(pico, packet);
         ValidatePicoPacket(packet, options.single_arm, options.head_yaw_clutched);
+        if (packet.timestamp_sec != previous_receive_sec)
+        {
+            max_receive_gap_ms = std::max(max_receive_gap_ms,
+                1000.0 * (packet.timestamp_sec - previous_receive_sec));
+            max_headset_gap_ms = std::max(max_headset_gap_ms,
+                packet.headset_timestamp_ms - previous_headset_ms);
+            if (packet.sequence >= previous_input_sequence)
+            {
+                max_sequence_step = std::max(max_sequence_step,
+                    packet.sequence - previous_input_sequence);
+            }
+            previous_receive_sec = packet.timestamp_sec;
+            previous_headset_ms = packet.headset_timestamp_ms;
+            previous_input_sequence = packet.sequence;
+        }
+        const bool input_connected = pico.IsConnected();
+        const double input_age_ms = 1000.0 * SecondsSince(packet.timestamp_sec);
+        max_input_age_ms = std::max(max_input_age_ms, input_age_ms);
         const double trace_taken = SteadyNowNanoseconds() / 1e9;
         const bool fresh =
-            pico.IsConnected() &&
-            SecondsSince(packet.timestamp_sec) <= kInputStaleSeconds;
+            input_connected && input_age_ms <= 1000.0 * kInputStaleSeconds;
         const double trace_left_read_start = SteadyNowNanoseconds() / 1e9;
         const auto left_state = arms.left_robot().GetState();
         const double trace_left_read_end = SteadyNowNanoseconds() / 1e9;
@@ -2983,6 +3300,130 @@ int RunSession(const Options &options,
                 << std::endl;
         }
         robot_state_was_fresh = true;
+
+        if (compliance)
+        {
+            if (!compliance->Healthy() || !arms.left_robot().IsConnected() ||
+                !arms.right_robot().IsConnected() ||
+                left_state.reference_frame != left_reference.name ||
+                right_state.reference_frame != right_reference.name)
+            {
+                compliance->Pause();
+                pico_guard_fault = true;
+                break;
+            }
+            const auto &left_controller = options.operator_facing_robot ? packet.right : packet.left;
+            const auto &right_controller = options.operator_facing_robot ? packet.left : packet.right;
+            const bool new_packet = packet.sequence != last_sequence;
+            const auto print_input_health = [&] {
+                std::cout << "PICO input_health host_s=" << trace_taken
+                          << " connected=" << input_connected
+                          << " input_seq=" << packet.sequence
+                          << " input_age_ms=" << input_age_ms
+                          << " loop_gap_ms=" << input_loop_gap_ms
+                          << " max_loop_gap_ms=" << max_loop_gap_ms
+                          << " max_receive_gap_ms=" << max_receive_gap_ms
+                          << " max_headset_gap_ms=" << max_headset_gap_ms
+                          << " max_input_age_ms=" << max_input_age_ms
+                          << " max_sequence_step=" << max_sequence_step
+                          << " L_present=" << left_controller.present
+                          << " L_tracked=" << left_controller.tracked
+                          << " R_present=" << right_controller.present
+                          << " R_tracked=" << right_controller.tracked << '\n';
+            };
+            if (!TickDualComplianceArm(options, packet, left_controller, fresh, new_packet,
+                                 left_state, left_reference, left_singularity,
+                                 left_hand, left_guard, compliance->left) ||
+                !TickDualComplianceArm(options, packet, right_controller, fresh, new_packet,
+                                 right_state, right_reference, right_singularity,
+                                 right_hand, right_guard, compliance->right))
+            {
+                compliance->Pause();
+                pico_guard_fault = true;
+                break;
+            }
+            const auto log_pause = [&](const char *arm, PicoCompliance &worker,
+                                       bool &previous_rearm) {
+                const auto status = worker.Snapshot();
+                if (status.rearm_required && !previous_rearm)
+                {
+                    std::cout << arm << " " << compliance_name
+                              << " input/pause event: " << status.pause_reason << '\n';
+                    print_input_health();
+                }
+                previous_rearm = status.rearm_required;
+            };
+            log_pause("L", compliance->left, left_rearm_logged);
+            log_pause("R", compliance->right, right_rearm_logged);
+            const auto update_gripper = [&](const PicoControllerPose &controller,
+                                             EndBoardDhGripper &gripper,
+                                             bool &pressed, bool &closed)
+            {
+                if (!fresh || !controller.present || !controller.tracked)
+                {
+                    gripper.CancelPending();
+                    pressed = true; // Release Trigger after input recovery.
+                }
+                else if (new_packet)
+                {
+                    const bool next_pressed = TriggerIsPressed(controller.trigger, pressed);
+                    if (options.enable_gripper && next_pressed && !pressed && gripper.Move(!closed))
+                    {
+                        closed = !closed;
+                    }
+                    pressed = next_pressed;
+                }
+            };
+            update_gripper(left_controller, left_gripper, left_trigger_pressed, left_gripper_closed);
+            update_gripper(right_controller, right_gripper, right_trigger_pressed, right_gripper_closed);
+            if (fresh)
+            {
+                last_sequence = packet.sequence;
+            }
+            for (size_t i = 0; i < 6; ++i)
+            {
+                diagnostics[i].store(left_state.positions[i], std::memory_order_relaxed);
+                diagnostics[6 + i].store(right_state.positions[i], std::memory_order_relaxed);
+            }
+            diagnostics[12].store(left_singularity.condition_number, std::memory_order_relaxed);
+            diagnostics[13].store(right_singularity.condition_number, std::memory_order_relaxed);
+            diagnostics[14].store(left_hand.singularity_scale, std::memory_order_relaxed);
+            diagnostics[15].store(right_hand.singularity_scale, std::memory_order_relaxed);
+            if (SecondsSince(last_print) >= 1.0)
+            {
+                PrintArmDiagnostics("L", left_controller, left_state, left_hand,
+                                    left_reference, left_singularity);
+                PrintArmDiagnostics("R", right_controller, right_state, right_hand,
+                                    right_reference, right_singularity);
+                const auto print_worker = [&](const char *arm, PicoCompliance &worker)
+                {
+                    const auto status = worker.Snapshot();
+                    std::cout << arm << ' ' << compliance_name << " phase=" << static_cast<int>(status.phase)
+                              << " sent=" << status.sent
+                              << (use_impedance ? " send_ms=" : " rpc_ms=") << status.call_ms
+                              << " shape_gap_mm=" << status.shape_gap_mm
+                              << " follow_err_mm=" << status.follow_error_mm
+                              << " check=" << (status.waiting_for_check ? "WAIT" : "OK")
+                              << " rearm=" << status.rearm_required
+                              << " pause=" << status.pause_reason << '\n';
+                };
+                print_worker("L", compliance->left);
+                print_worker("R", compliance->right);
+                print_input_health();
+                max_loop_gap_ms = max_receive_gap_ms = max_headset_gap_ms = 0.0;
+                max_input_age_ms = 0.0;
+                max_sequence_step = 0;
+                last_print = std::chrono::steady_clock::now();
+            }
+            next_servo_tick += kServoPeriod;
+            const auto now = std::chrono::steady_clock::now();
+            if (next_servo_tick < now - kServoPeriod)
+            {
+                next_servo_tick = now;
+            }
+            std::this_thread::sleep_until(next_servo_tick);
+            continue;
+        }
 
         const auto update_singularity_freshness =
             [&](const char *arm, const SingularitySlowdownStatus &status,
@@ -3214,6 +3655,28 @@ int RunSession(const Options &options,
         std::this_thread::sleep_until(next_servo_tick);
     }
 
+    if (compliance)
+    {
+        compliance->Stop();
+        if (!compliance->Healthy())
+        {
+            pico_guard_fault = true;
+        }
+        // No ServoP/ServoJ hold on compliance exit. The backend returns to measured
+        // joint hold; only wait for standstill before disabling both arms.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!safety_fault_detected && !pico_guard_fault &&
+               (!JointsNearStill(arms.left_robot().GetState()) ||
+                !JointsNearStill(arms.right_robot().GetState())))
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                pico_guard_fault = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
     if (pico_guard_fault)
     {
         // No Cartesian or joint hold targets on this exit path.
@@ -3247,7 +3710,28 @@ int RunSession(const Options &options,
     std::cout << "\n正在结束遥操并分别下使能..." << std::endl;
     try
     {
-        if (!safety_fault_detected)
+        if (compliance)
+        {
+            const auto disable_arm = [](const char *name, rcore::sdk::Robot &robot)
+            {
+                try
+                {
+                    auto result = robot.Disable();
+                    const auto motors = robot.Control().GetMotorStatus();
+                    PrintDisableStatus(name, result, motors);
+                    return result.IsSuccess() && !motors.enabled;
+                }
+                catch (const std::exception &error)
+                {
+                    std::cerr << name << " compliance Disable failed: " << error.what() << '\n';
+                    return false;
+                }
+            };
+            const bool left_disabled = disable_arm("L", arms.left_robot());
+            const bool right_disabled = disable_arm("R", arms.right_robot());
+            safety_fault_detected = safety_fault_detected || !left_disabled || !right_disabled;
+        }
+        else if (!safety_fault_detected)
         {
             HoldThenDisable(arms.left_robot(), "L");
             HoldThenDisable(arms.right_robot(), "R");

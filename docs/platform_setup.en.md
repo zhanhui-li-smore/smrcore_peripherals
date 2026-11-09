@@ -37,6 +37,7 @@ sudo usermod -aG dialout "$USER"
 `app_peripherals_bridge` requires a reachable robot controller and a matching `smrcore_sdk` version. For standalone builds, first run:
 
 ```bash
+sudo apt-get install libxcb1-dev pkg-config
 ./scripts/download.sh
 ./scripts/build.sh --with-sdk ON
 ```

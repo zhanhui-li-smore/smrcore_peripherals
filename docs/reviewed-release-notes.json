@@ -41,5 +41,52 @@
         ]
       }
     ]
+  },
+  {
+    "base_sha": "4d4167a00b05ea41792fc6871c6707557eddb03b",
+    "target_sha": "869d31b834a3c0333d9172eac6c6d9a0d647a2d5",
+    "commits": [
+      "869d31b834a3c0333d9172eac6c6d9a0d647a2d5"
+    ],
+    "groups": [
+      {
+        "category": "pico",
+        "entries": [
+          {
+            "zh": "双臂新增 FDCC 和笛卡尔阻抗遥操，支持左右手柄独立启停；默认仍为 ServoP。",
+            "en": "Add dual-arm FDCC and Cartesian impedance teleoperation with independent left/right Grip control. ServoP remains the default.",
+            "commits": [
+              "869d31b834a3c0333d9172eac6c6d9a0d647a2d5"
+            ]
+          },
+          {
+            "zh": "增加阻尼、跟随倍率、直接跟随和阻抗关节参考限速选项，补充操作指南。",
+            "en": "Add damping, response gain, direct-target and impedance joint-reference speed options, with updated operating guides.",
+            "commits": [
+              "869d31b834a3c0333d9172eac6c6d9a0d647a2d5"
+            ]
+          },
+          {
+            "zh": "优化松手停稳、故障退出和输入诊断，输入超时由 250ms 调整为 400ms。",
+            "en": "Improve settling on Grip release, fault cleanup and input diagnostics. Increase the input timeout from 250ms to 400ms.",
+            "commits": [
+              "869d31b834a3c0333d9172eac6c6d9a0d647a2d5"
+            ]
+          }
+        ]
+      },
+      {
+        "category": "other",
+        "entries": [
+          {
+            "zh": "新增单臂／双臂键盘遥操，支持笛卡尔与关节控制；本地 X11 支持按住连续移动，终端支持点动。",
+            "en": "Add single- and dual-arm keyboard teleoperation in Cartesian and joint space, with held-key motion on local X11 and terminal jogs.",
+            "commits": [
+              "869d31b834a3c0333d9172eac6c6d9a0d647a2d5"
+            ]
+          }
+        ]
+      }
+    ]
   }
 ]
